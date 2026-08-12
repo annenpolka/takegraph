@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
+import { ProjectSession } from "./project-session.js";
 import { createServer } from "./server.js";
 
 async function startStdioServer(factory: () => McpServer): Promise<void> {
@@ -46,9 +47,11 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
   });
 }
 
-if (process.argv.includes("--stdio")) {
-  await startStdioServer(createServer);
-} else {
-  await startHttpServer(createServer);
-}
+const session = new ProjectSession();
+const serverFactory = () => createServer({ session });
 
+if (process.argv.includes("--stdio")) {
+  await startStdioServer(serverFactory);
+} else {
+  await startHttpServer(serverFactory);
+}

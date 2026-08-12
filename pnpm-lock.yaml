@@ -18,7 +18,7 @@ importers:
         specifier: 1.7.5
         version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.4.3)
       '@modelcontextprotocol/sdk':
-        specifier: ^1.19.9
+        specifier: ^1.30.0
         version: 1.30.0(supports-color@7.2.0)(zod@4.4.3)
       cors:
         specifier: ^2.8.5
@@ -26,6 +26,9 @@ importers:
       express:
         specifier: ^5.1.0
         version: 5.2.1(supports-color@7.2.0)
+      zod:
+        specifier: ^4.1.13
+        version: 4.4.3
     devDependencies:
       '@types/cors':
         specifier: ^2.8.19

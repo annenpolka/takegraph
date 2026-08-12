@@ -8,13 +8,14 @@
     "check": "tsc --noEmit",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js --stdio",
-    "test": "tsc --noEmit"
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",
-    "@modelcontextprotocol/sdk": "^1.19.9",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
@@ -24,4 +25,3 @@
     "typescript": "^5.9.0"
   }
 }
-

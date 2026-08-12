@@ -24,7 +24,11 @@ pnpm spec:run       # Random exploration of patch invariants
 pnpm verify         # All of the above
 ```
 
-For the UI, `pnpm dev:view` opens a standalone adapter with sample data. Embedded hosts use the same UI through `McpAppsHostBridge`.
+For the UI, `pnpm dev:view` opens a standalone adapter with sample data.
+Embedded hosts use the same UI through `McpAppsHostBridge`; its mutations call
+MCP tools and never write canonical project state directly. `pnpm test` builds
+the Rust patch guard and production single-file view before exercising both an
+in-memory MCP transport and the built stdio process.
 
 For VOICEVOX, start an engine separately and run:
 
@@ -46,4 +50,3 @@ When a change affects allowed operation order, concurrency, retry, cancellation,
 5. run `pnpm verify`.
 
 UI layout, codecs, visual quality, platform APIs, and network wiring remain integration, E2E, or manual boundaries; Quint does not prove them.
-

@@ -18,7 +18,7 @@
     "dev:view": "pnpm --filter @takegraph/studio-view dev",
     "spec:run": "quint run --max-samples=1000 --invariant=safety specs/protocols/patch_protocol.qnt",
     "spec:typecheck": "quint typecheck specs/protocols/patch_protocol.qnt",
-    "test": "pnpm -r test && cargo test --workspace",
+    "test": "cargo build -p takegraph-cli && pnpm build:view && pnpm build:mcp && pnpm -r test && cargo test --workspace",
     "verify": "pnpm check && pnpm test && pnpm spec:typecheck && pnpm spec:run"
   },
   "devDependencies": {
