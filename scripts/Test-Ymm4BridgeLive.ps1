@@ -216,13 +216,30 @@ if ($RunSceneCapture) {
         Assert-True (Test-Path -LiteralPath $profilePath -PathType Leaf) "Scene profile is missing beside $taskPath."
         $task = Get-Content -LiteralPath $taskPath -Raw | ConvertFrom-Json -Depth 100
         Assert-True ($task.plan.digest -eq $ApprovedSceneDigest) 'ApprovedSceneDigest does not match the persisted scene plan.'
-        $expectedCaptureCount = @($task.plan.frames).Count
-        $approved = Invoke-TakeGraphJson (@('ymm4', 'scene-approve', '--task', $taskPath, '--digest', $ApprovedSceneDigest, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
-        $captured = Invoke-TakeGraphJson (@('ymm4', 'scene-capture', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
-        $replayed = Invoke-TakeGraphJson (@('ymm4', 'scene-replay', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+        $expectedCaptureCount = @($task.plan.samples).Count
+        $taskStatus = [string] $task.receipt.status
+        if ($taskStatus -eq 'staged') {
+            $approved = Invoke-TakeGraphJson (@('ymm4', 'scene-approve', '--task', $taskPath, '--digest', $ApprovedSceneDigest, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+            $approvalStatus = [string] $approved.receipt.status
+            $captured = Invoke-TakeGraphJson (@('ymm4', 'scene-capture', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+            $replayed = Invoke-TakeGraphJson (@('ymm4', 'scene-replay', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+        }
+        elseif ($taskStatus -eq 'approved') {
+            $approvalStatus = 'approved'
+            $captured = Invoke-TakeGraphJson (@('ymm4', 'scene-capture', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+            $replayed = Invoke-TakeGraphJson (@('ymm4', 'scene-replay', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+        }
+        elseif ($taskStatus -in @('captured', 'reviewed', 'accepted', 'rejected')) {
+            $approvalStatus = 'approved'
+            $replayed = Invoke-TakeGraphJson (@('ymm4', 'scene-replay', '--task', $taskPath, '--current-profile', $profilePath, '--head', [string] $effectiveHead) + $expectedProjectArguments)
+            $captured = $replayed
+        }
+        else {
+            throw "Scene task cannot be captured or replayed from status $taskStatus."
+        }
         Assert-True ($captured.receipt.status -eq 'captured') "Scene capture status is $($captured.receipt.status)."
-        Assert-True ($captured.receipt.transientStateRestored -eq $true) 'Scene capture did not prove transient-state restoration.'
-        Assert-True ($captured.receipt.projectDirtyBefore -eq $captured.receipt.projectDirtyAfter) 'Scene capture changed project dirty state.'
+        Assert-True ($captured.receipt.captureEvidence.transientStateRestored -eq $true) 'Scene capture did not prove transient-state restoration.'
+        Assert-True ($captured.receipt.captureEvidence.projectDirtyBefore -eq $captured.receipt.captureEvidence.projectDirtyAfter) 'Scene capture changed project dirty state.'
         Assert-True (@($captured.images).Count -eq $expectedCaptureCount) 'Scene capture returned an unexpected image count.'
         Assert-True ($replayed.authenticatedReplayPerformed -eq $true) 'Scene receipt was not authenticated by replay.'
         $sceneEvidence = [pscustomobject]@{
@@ -230,9 +247,9 @@ if ($RunSceneCapture) {
             taskPath = $taskPath
             profilePath = $profilePath
             digest = $ApprovedSceneDigest
-            approvalStatus = $approved.receipt.status
+            approvalStatus = $approvalStatus
             captureStatus = $captured.receipt.status
-            transientStateRestored = $captured.receipt.transientStateRestored
+            transientStateRestored = $captured.receipt.captureEvidence.transientStateRestored
             images = $captured.images
             replayed = $replayed.authenticatedReplayPerformed
         }
