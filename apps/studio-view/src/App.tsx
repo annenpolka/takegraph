@@ -4,6 +4,8 @@ import {
   type ProjectState,
 } from "./host-bridge";
 
+type StudioRegion = "script" | "preview" | "voice";
+
 function formatDuration(durationMs: number): string {
   return `${(durationMs / 1_000).toFixed(2)}s`;
 }
@@ -22,6 +24,7 @@ export function App() {
   const [intonation, setIntonation] = useState(0.95);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [activeRegion, setActiveRegion] = useState<StudioRegion>("preview");
 
   useEffect(() => {
     let active = true;
@@ -97,6 +100,12 @@ export function App() {
     if (next) await bridge.focusUtterance(next).catch(() => undefined);
   }
 
+  async function stageSelectedTake() {
+    if (!selectedTake) return;
+    const next = await run(() => bridge.stageTake(selectedTake.id));
+    if (next?.stagedPatch) setActiveRegion("preview");
+  }
+
   const impactText = stagedPatch
     ? `${stagedPatch.durationDeltaMs > 0 ? "+" : ""}${stagedPatch.durationDeltaMs}ms · ${stagedPatch.movedItemCount} items ripple`
     : "変更はまだステージされていません";
@@ -109,7 +118,7 @@ export function App() {
           <div><strong>TakeGraph</strong><span>Every take, traceable.</span></div>
         </div>
         <div className="project-meta">
-          <span>{state?.projectName ?? "Loading project…"}</span>
+          <span className="project-name">{state?.projectName ?? "Loading project…"}</span>
           <span className="revision">r{state?.revision ?? "—"}</span>
           <span className={`engine ${state?.voiceEngine ?? "unavailable"}`}>
             VOICEVOX {state?.voiceEngine === "connected" ? "online" : "offline"}
@@ -117,7 +126,7 @@ export function App() {
           <span className="mode">{bridge.mode}</span>
           {bridge.mode === "mcp" && (
             <button className="fullscreen" type="button" onClick={() => void bridge.requestFullscreen()}>
-              Fullscreen
+              拡大 ↗
             </button>
           )}
         </div>
@@ -126,8 +135,52 @@ export function App() {
       {error && <div className="error-banner" role="alert">Project service: {error}</div>}
       {busy && <div className="status-banner" role="status">TakeGraph tool is running…</div>}
 
+      <nav className="inline-tabs" aria-label="Editor sections" role="tablist">
+        <button
+          id="tab-script"
+          type="button"
+          role="tab"
+          aria-controls="region-script"
+          aria-selected={activeRegion === "script"}
+          className={activeRegion === "script" ? "active" : ""}
+          onClick={() => setActiveRegion("script")}
+        >
+          <span>台本</span>
+          <em>{state?.utterances.length ?? "—"}</em>
+        </button>
+        <button
+          id="tab-preview"
+          type="button"
+          role="tab"
+          aria-controls="region-preview"
+          aria-selected={activeRegion === "preview"}
+          className={activeRegion === "preview" ? "active" : ""}
+          onClick={() => setActiveRegion("preview")}
+        >
+          <span>プレビュー</span>
+          {stagedPatch && <i aria-label="patch staged" />}
+        </button>
+        <button
+          id="tab-voice"
+          type="button"
+          role="tab"
+          aria-controls="region-voice"
+          aria-selected={activeRegion === "voice"}
+          className={activeRegion === "voice" ? "active" : ""}
+          onClick={() => setActiveRegion("voice")}
+        >
+          <span>音声</span>
+          <em>{takes?.length ?? "—"}</em>
+        </button>
+      </nav>
+
       <section className="workspace">
-        <aside className="script-panel panel">
+        <aside
+          id="region-script"
+          className={`script-panel panel studio-region ${activeRegion === "script" ? "is-active" : ""}`}
+          role="tabpanel"
+          aria-labelledby="tab-script"
+        >
           <div className="panel-heading">
             <div><span className="eyebrow">SCRIPT GRAPH</span><h1>台本</h1></div>
             <button type="button" className="icon-button" disabled title="台本編集は次のマイルストーンです">＋</button>
@@ -150,7 +203,12 @@ export function App() {
           </div>
         </aside>
 
-        <section className="preview-column">
+        <section
+          id="region-preview"
+          className={`preview-column studio-region ${activeRegion === "preview" ? "is-active" : ""}`}
+          role="tabpanel"
+          aria-labelledby="tab-preview"
+        >
           <div className="preview panel">
             <div className="preview-toolbar">
               <span className="eyebrow">REFERENCE PREVIEW</span>
@@ -184,7 +242,12 @@ export function App() {
           </div>
         </section>
 
-        <aside className="voice-panel panel">
+        <aside
+          id="region-voice"
+          className={`voice-panel panel studio-region ${activeRegion === "voice" ? "is-active" : ""}`}
+          role="tabpanel"
+          aria-labelledby="tab-voice"
+        >
           <div className="panel-heading">
             <div><span className="eyebrow">VOICE AUDITION</span><h2>音声テイク</h2></div>
             <span className="speaker-pill">{utterance?.speaker ?? "—"}</span>
@@ -214,8 +277,8 @@ export function App() {
           </div>
           <div className="actions">
             <button type="button" className="secondary" disabled={busy || !utterance} onClick={() => void generateVariant()}>候補を作成</button>
-            <button type="button" className="primary" disabled={busy || !selectedTake || selectedTake.readiness !== "ready" || selectedTake.status === "active"} onClick={() => selectedTake && void run(() => bridge.stageTake(selectedTake.id))}>
-              {selectedTake?.readiness === "query-ready" ? "音声artifact待ち" : `Take ${selectedTake?.label ?? "—"}をプレビュー`}
+            <button type="button" className="primary" disabled={busy || Boolean(stagedPatch) || !selectedTake || selectedTake.readiness !== "ready" || selectedTake.status === "active"} onClick={() => void stageSelectedTake()}>
+              {stagedPatch ? "Preview中" : selectedTake?.readiness === "query-ready" ? "音声artifact待ち" : `Take ${selectedTake?.label ?? "—"}をプレビュー`}
             </button>
           </div>
           {stagedPatch && (
