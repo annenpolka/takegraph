@@ -16,9 +16,10 @@
     "dev": "pnpm --parallel --filter @takegraph/studio-view --filter @takegraph/mcp-server dev",
     "dev:mcp": "pnpm --filter @takegraph/mcp-server dev",
     "dev:view": "pnpm --filter @takegraph/studio-view dev",
-    "spec:run": "quint run --max-samples=1000 --invariant=safety specs/protocols/patch_protocol.qnt",
-    "spec:typecheck": "quint typecheck specs/protocols/patch_protocol.qnt",
-    "test": "cargo build -p takegraph-cli && pnpm build:view && pnpm build:mcp && pnpm -r test && cargo test --workspace",
+    "spec:run": "quint run --max-samples=1000 --invariant=safety specs/protocols/patch_protocol.qnt && quint run --main=ymm4ApplyProtocol --max-samples=1000 --invariant=safety specs/protocols/ymm4_apply_protocol.qnt && quint run --main=ymm4LifecycleProtocol --max-samples=1000 --invariant=lifecycleSafety specs/protocols/ymm4_apply_protocol.qnt && quint run --main=ymm4ReconciliationProtocol --max-samples=1000 --invariant=reconciliationSafety specs/protocols/ymm4_apply_protocol.qnt && quint run --main=ymm4ExternalMutationFenceProtocol --max-samples=1000 --invariant=externalMutationFenceSafety specs/protocols/ymm4_apply_protocol.qnt",
+    "spec:typecheck": "quint typecheck specs/protocols/patch_protocol.qnt && quint typecheck specs/protocols/ymm4_apply_protocol.qnt",
+    "test:bridge": "dotnet run --project bridges/ymm4/TakeGraph.Ymm4Bridge.Tests/TakeGraph.Ymm4Bridge.Tests.csproj -c Release -p:UseYmm4ContractStub=true",
+    "test": "cargo build -p takegraph-cli && pnpm build:view && pnpm build:mcp && pnpm -r test && cargo test --workspace && pnpm test:bridge",
     "verify": "pnpm check && pnpm test && pnpm spec:typecheck && pnpm spec:run"
   },
   "devDependencies": {

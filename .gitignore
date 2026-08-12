@@ -1,10 +1,15 @@
 # Rust
 /target/
+/.target-audit/
 
 # Node.js
 /node_modules/
 **/node_modules/
 **/dist/
+
+# .NET
+**/bin/
+**/obj/
 
 # Local environment
 .env
@@ -13,6 +18,8 @@
 
 # TakeGraph projects and generated media
 *.takegraph/
+.takegraph/
+artifacts/
 *.wav
 *.mp4
 *.webm
@@ -27,4 +34,3 @@ Thumbs.db
 # Generated verification artifacts
 /generated/*
 !/generated/README.md
-

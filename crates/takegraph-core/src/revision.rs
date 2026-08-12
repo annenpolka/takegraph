@@ -121,22 +121,11 @@ impl Patch {
     /// Returns an error for an invalid lifecycle state, stale base, stale
     /// approval, hard-lock conflict, or revision overflow.
     pub fn commit(&mut self, current_head: RevisionId) -> Result<RevisionId, PatchError> {
-        self.require_status(PatchStatus::Approved)?;
-
-        if self.base != current_head {
-            self.status = PatchStatus::Conflicted;
-            return Err(PatchError::StaleBase {
-                expected: self.base,
-                actual: current_head,
-            });
-        }
-
-        if self.approved_digest.as_deref() != Some(self.digest.as_str()) {
-            return Err(PatchError::StaleApproval);
-        }
-
-        if self.touches_hard_lock {
-            return Err(PatchError::HardLock);
+        if let Err(error) = self.authorize_commit(current_head) {
+            if matches!(error, PatchError::StaleBase { .. }) {
+                self.status = PatchStatus::Conflicted;
+            }
+            return Err(error);
         }
 
         let next = current_head
@@ -144,6 +133,31 @@ impl Patch {
             .ok_or(PatchError::RevisionOverflow)?;
         self.status = PatchStatus::Committed;
         Ok(next)
+    }
+
+    /// Checks commit authorization without advancing the patch or project revision.
+    ///
+    /// External adapters use this immediately before I/O, then call [`Self::commit`]
+    /// under the same project-service lock after verified read-back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid lifecycle, stale base/approval, or hard locks.
+    pub fn authorize_commit(&self, current_head: RevisionId) -> Result<(), PatchError> {
+        self.require_status(PatchStatus::Approved)?;
+        if self.base != current_head {
+            return Err(PatchError::StaleBase {
+                expected: self.base,
+                actual: current_head,
+            });
+        }
+        if self.approved_digest.as_deref() != Some(self.digest.as_str()) {
+            return Err(PatchError::StaleApproval);
+        }
+        if self.touches_hard_lock {
+            return Err(PatchError::HardLock);
+        }
+        Ok(())
     }
 
     fn require_status(&self, expected: PatchStatus) -> Result<(), PatchError> {
@@ -211,5 +225,19 @@ mod tests {
             Err(PatchError::StaleBase { .. })
         ));
         assert_eq!(patch.status, PatchStatus::Conflicted);
+    }
+
+    #[test]
+    fn preflight_does_not_advance_or_mutate_patch() {
+        let mut patch = Patch::draft(RevisionId(7), "digest-a");
+        patch.validate().unwrap();
+        patch.materialize_preview().unwrap();
+        patch.approve().unwrap();
+        let before = patch.clone();
+
+        patch.authorize_commit(RevisionId(7)).unwrap();
+
+        assert_eq!(patch, before);
+        assert_eq!(patch.status, PatchStatus::Approved);
     }
 }

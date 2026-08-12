@@ -1,9 +1,62 @@
 //! Canonical project service façade.
 //!
-//! Persistence is deliberately deferred. The initial service proves that all
-//! commits pass through the deterministic core state transition.
+//! In-memory staging remains available for the portable core guard. External
+//! editor workflows use the append-only, hash-chained [`DurableProjectStore`]
+//! and source-bound task journals before advancing canonical state.
 
 use takegraph_core::{Patch, PatchError, PatchId, RevisionId};
+
+mod external_mutation;
+mod managed_projection;
+pub mod native_extension_plan;
+pub mod project_operations;
+pub mod project_store;
+pub mod scene_inspection;
+pub mod ymm4_export;
+pub mod ymm4_native_extension;
+pub mod ymm4_native_voice_export;
+pub mod ymm4_native_voice_mutation;
+pub mod ymm4_realization;
+pub mod ymm4_target_plan;
+
+pub use external_mutation::DurableExternalMutationOutcome;
+pub use native_extension_plan::{
+    ExistingNativeExtension, ExistingNativeExtensionKind, ExistingUpdateMode,
+    NativeExtensionCapabilities, NativeExtensionFeature, NativeExtensionObservation,
+    NativeExtensionPlanContext, NativeExtensionPlanError, plan_native_extensions,
+    plan_native_extensions_with_identity_overrides,
+};
+pub use project_operations::{
+    CheckpointTaskRecord, CheckpointTaskStatus, DurableTaskRecord, ProjectOperationError,
+    ProjectOperationStore, ReconciliationBridgeWireStatus, ReconciliationChildKind,
+    ReconciliationChildReference, ReconciliationChildTask, ReconciliationDetachContract,
+    ReconciliationDetachDraft, ReconciliationDetachRequirement, ReconciliationDetachStatus,
+    ReconciliationDownstreamPreview, ReconciliationExporterRoute, ReconciliationImportPatchDraft,
+    ReconciliationReExportManifest, ReconciliationReExportStatus, ReconciliationReExportTask,
+    ReconciliationTaskRecord, ReconciliationTaskStatus, RenderTaskRecord, RenderTaskStatus,
+};
+pub use project_store::{
+    DurableProjectState, DurableProjectStore, ExternalCommitRecord, ExternalMutationFence,
+    ManagedTargetState, PendingExternalCommit, PendingExternalCommitKind, ProjectStoreError,
+    TargetLink, VerifiedTargetBinding,
+};
+pub use scene_inspection::{
+    ChangedCueFrameRange, SceneCaptureEvidence, SceneCaptureProfile, SceneCaptureSamplePlan,
+    SceneHumanReview, SceneInspectionError, SceneInspectionPlan, SceneInspectionReceipt,
+    SceneInspectionSource, SceneInspectionStatus, SceneInspectionTask, SceneReviewDecision,
+    sample_changed_cue_frames,
+};
+pub use ymm4_export::{Ymm4ExportError, Ymm4ExportPatch};
+pub use ymm4_native_extension::{
+    NativeExtensionArtifactSource, NativeExtensionStageManifest, Ymm4NativeExtensionError,
+    Ymm4NativeExtensionTask,
+};
+pub use ymm4_native_voice_export::{Ymm4NativeVoiceExportError, Ymm4NativeVoiceExportPatch};
+pub use ymm4_native_voice_mutation::{Ymm4NativeVoiceMutationError, Ymm4NativeVoiceMutationPatch};
+pub use ymm4_realization::{RealizationReadbackError, normalize_realizations};
+pub use ymm4_target_plan::{
+    TargetPlanBuildError, native_voice_target_plan, portable_pair_target_plan,
+};
 
 #[derive(Debug, Default)]
 pub struct ProjectService {

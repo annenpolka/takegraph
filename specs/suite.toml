@@ -26,3 +26,283 @@ implementation_paths = [
 profiles = ["fast", "pr", "nightly"]
 residual = "Persistence atomicity remains an integration boundary."
 
+[[property]]
+id = "YMM-001"
+module = "ymm4ApplyProtocol"
+expression = "approvalIsRequestBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Contracts.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Cryptographic digest construction remains an implementation and integration boundary."
+
+[[property]]
+id = "YMM-002"
+module = "ymm4ApplyProtocol"
+expression = "capabilityRevisionIsFresh"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Detection of installed YMM4 capability changes remains an integration boundary."
+
+[[property]]
+id = "YMM-003"
+module = "ymm4ApplyProtocol"
+expression = "walPrecedesMutation"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ReceiptStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Filesystem durability and YMM4 process termination timing remain integration boundaries."
+
+[[property]]
+id = "YMM-004"
+module = "ymm4ApplyProtocol"
+expression = "recoveryHasWal"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ReceiptStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Recovery across operating-system and storage failures requires fault-injection tests."
+
+[[property]]
+id = "YMM-005"
+module = "ymm4ApplyProtocol"
+expression = "rollbackRestoresExternalState"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ReceiptStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "YMM4-native undo semantics and third-party plugin side effects remain integration boundaries."
+
+[[property]]
+id = "YMM-006"
+module = "ymm4ApplyProtocol"
+expression = "committedOnlyAfterVerifiedReceipt"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ReceiptStore.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Readback fidelity against YMM4's private object model remains an integration boundary."
+
+[[property]]
+id = "YMM-007"
+module = "ymm4LifecycleProtocol"
+expression = "recoveryRequiredAfterRollbackFailure"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ReceiptStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Durable preimages, restart scanning, fail-closed recovery_required authorization, and operator-visible recovery state are implemented; live crash injection across every supported YMM4 driver remains required."
+
+[[property]]
+id = "YMM-008"
+module = "ymm4LifecycleProtocol"
+expression = "verifiedApplyWithinApprovedBudget"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_export.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Driver readback must measure every budget dimension, including native duration and downstream shift."
+
+[[property]]
+id = "YMM-009"
+module = "ymm4LifecycleProtocol"
+expression = "unmanagedStateIsPreserved"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Unknown YMM fields and third-party effect behavior require per-version preservation tests."
+
+[[property]]
+id = "YMM-010"
+module = "ymm4LifecycleProtocol"
+expression = "nativeUndoDoesNotAdvanceRevision"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Manual YMM Undo/Redo is detected as drift and still requires live host integration coverage."
+
+[[property]]
+id = "YMM-011"
+module = "ymm4LifecycleProtocol"
+expression = "checkpointLifecycleIsSourceBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "File-level checkpoint receipts, source/profile binding, independent rehash, and save fault injection are implemented; the live save/restart matrix remains unverified."
+
+[[property]]
+id = "YMM-012"
+module = "ymm4LifecycleProtocol"
+expression = "inspectionLifecycleIsSourceBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Native frame capture, content-addressed ingestion, deterministic detectors, authenticated replay, inline receipt-verified MCP PNG content, and explicit human decisions are implemented; OCR and live transient-state restoration coverage remain open."
+
+[[property]]
+id = "YMM-013"
+module = "ymm4LifecycleProtocol"
+expression = "renderLifecycleIsSourceBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Render lifecycle/WAL/checkpoint binding, leased candidate namespace, verified-before-publish ownership, and exact active-writer/settings/binary/H.264/AAC-LC 48 kHz media evidence are implemented but gated. YMM4 4.55.1.1 exposes no proven exhaustive manifest of all project assets, fonts, voice/tachie/effect inputs, and plugin settings consumed by the child encoder, so render capabilities remain fail-closed until that closure is SHA-256-bound and leased."
+
+[[property]]
+id = "YMM-014"
+module = "ymm4LifecycleProtocol"
+expression = "tier2TasksDoNotAdvanceRevision"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Checkpoint, inspection, and render persistence must remain separate from canonical patch finalization."
+
+[[property]]
+id = "YMM-015"
+module = "ymm4LifecycleProtocol"
+expression = "projectOperationGateIsExclusive"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+  "docs/ymm4-native-integration.md",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Direct user actions and third-party YMM plugins remain outside the bridge operation gate."
+
+[[property]]
+id = "YMM-016"
+module = "ymm4ReconciliationProtocol"
+expression = "detachWalPrecedesMutation"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/MetadataDetachStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.MetadataDetach.cs",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Process-crash recovery is covered; parent-directory rename durability under abrupt hardware power loss and live YMM4 Remark serialization still require supported-driver/filesystem fault injection."
+
+[[property]]
+id = "YMM-017"
+module = "ymm4ReconciliationProtocol"
+expression = "verifiedDetachHasFreshBoundReceipt"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-node/src/reconciliation.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.MetadataDetach.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Full-scene before/expected-post Remark witnesses fail closed in unit models; live third-party mutation timing still needs supported-host coverage."
+
+[[property]]
+id = "YMM-018"
+module = "ymm4ReconciliationProtocol"
+expression = "reExportDispatchDoesNotMutate"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_operations.rs",
+  "apps/mcp-server/src/ymm4-workflow.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Downstream exporters retain their ordinary independent approval/apply and live-driver verification boundaries."
+
+[[property]]
+id = "YMM-019"
+module = "ymm4ReconciliationProtocol"
+expression = "reExportManifestReplayIsBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_operations.rs",
+  "crates/takegraph-cli/src/main.rs",
+  "apps/mcp-server/src/ymm4-workflow.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The route-specific exporter retains its own independent approval and live-driver proof obligations."
+
+[[property]]
+id = "YMM-020"
+module = "ymm4ReconciliationProtocol"
+expression = "detachOwnershipCommitIsExactlyOnce"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "crates/takegraph-service/tests/native_extension_reconciliation.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The durable CAS is operation-ID idempotent; live testing must still inject a process crash between canonical commit and child-journal publication."
+
+[[property]]
+id = "YMM-021"
+module = "ymm4ExternalMutationFenceProtocol"
+expression = "externalMutationFenceSafety"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/external_mutation.rs",
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_export.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_mutation.rs",
+  "crates/takegraph-service/src/ymm4_native_extension.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The durable reservation closes process-crash and cross-route races; abrupt hardware power loss below filesystem sync and direct third-party YMM4 mutations remain outside this service fence."
