@@ -1,0 +1,30 @@
+# Rust
+/target/
+
+# Node.js
+/node_modules/
+**/node_modules/
+**/dist/
+
+# Local environment
+.env
+.env.local
+!.env.example
+
+# TakeGraph projects and generated media
+*.takegraph/
+*.wav
+*.mp4
+*.webm
+.cache/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*.log
+
+# Generated verification artifacts
+/generated/*
+!/generated/README.md
+

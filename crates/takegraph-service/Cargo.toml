@@ -1,0 +1,12 @@
+[package]
+name = "takegraph-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+takegraph-core = { path = "../takegraph-core" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

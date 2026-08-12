@@ -1,0 +1,19 @@
+[package]
+name = "takegraph-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "takegraph"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+takegraph-node = { path = "../takegraph-node" }
+tokio.workspace = true
+
+[lints]
+workspace = true
+

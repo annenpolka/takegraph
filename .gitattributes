@@ -1,0 +1,9 @@
+* text=auto eol=lf
+*.wav binary
+*.mp4 binary
+*.webm binary
+*.png binary
+*.jpg binary
+*.sqlite binary
+*.db binary
+

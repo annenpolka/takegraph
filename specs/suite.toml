@@ -1,0 +1,28 @@
+schema_version = 1
+
+[[property]]
+id = "REV-001"
+module = "patchProtocol"
+expression = "approvalIsFresh"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/revision.rs",
+  "crates/takegraph-service/src/lib.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "REV-002"
+module = "patchProtocol"
+expression = "committedSafely"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/revision.rs",
+  "crates/takegraph-service/src/lib.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Persistence atomicity remains an integration boundary."
+

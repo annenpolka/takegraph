@@ -1,0 +1,27 @@
+{
+  "name": "takegraph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-native, voice-first video editing with reviewable patches.",
+  "packageManager": "pnpm@11.16.0",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": ">=11 <12"
+  },
+  "scripts": {
+    "build": "pnpm build:view && pnpm build:mcp && cargo build --workspace",
+    "build:mcp": "pnpm --filter @takegraph/mcp-server build",
+    "build:view": "pnpm --filter @takegraph/studio-view build",
+    "check": "pnpm -r check && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "dev": "pnpm --parallel --filter @takegraph/studio-view --filter @takegraph/mcp-server dev",
+    "dev:mcp": "pnpm --filter @takegraph/mcp-server dev",
+    "dev:view": "pnpm --filter @takegraph/studio-view dev",
+    "spec:run": "quint run --max-samples=1000 --invariant=safety specs/protocols/patch_protocol.qnt",
+    "spec:typecheck": "quint typecheck specs/protocols/patch_protocol.qnt",
+    "test": "pnpm -r test && cargo test --workspace",
+    "verify": "pnpm check && pnpm test && pnpm spec:typecheck && pnpm spec:run"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "0.32.0"
+  }
+}
