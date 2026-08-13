@@ -148,6 +148,18 @@ fn normalized_features(
     )?;
     insert_feature(
         &mut features,
+        "timelineEdit.apply",
+        has(Ymm4Capability::TimelineEditManagedCueMixed),
+        [
+            ("atomicity", CapabilityValue::Text("whole_request".into())),
+            ("maxOperations", CapabilityValue::Integer(128)),
+            ("mixedManagedCueStrategies", CapabilityValue::Boolean(true)),
+            ("nativeExtension", CapabilityValue::Boolean(false)),
+            ("orderedApply", CapabilityValue::Boolean(true)),
+        ],
+    )?;
+    insert_feature(
+        &mut features,
         "managedIdentity.detach",
         has(Ymm4Capability::MetadataRemarkDetach)
             && has(Ymm4Capability::RequestBoundReceipts)
@@ -168,6 +180,7 @@ fn normalized_features(
     insert_voice_features(&mut features, raw)?;
     insert_transaction_feature(&mut features, raw)?;
     insert_scene_capture_feature(&mut features, raw)?;
+    insert_scene_composition_feature(&mut features, raw)?;
     insert_native_extension_features(&mut features, raw)?;
     insert_feature(
         &mut features,
@@ -184,6 +197,22 @@ fn insert_project_output_features(
     raw: &Ymm4Capabilities,
 ) -> Result<(), CanonicalError> {
     let has = |capability| raw.capabilities.contains(&capability);
+    insert_feature(
+        features,
+        "project.initialize",
+        has(Ymm4Capability::ProjectInitializeSaveAsVerified),
+        [
+            (
+                "modes",
+                CapabilityValue::Text("adopt_active,save_untitled".into()),
+            ),
+            ("newPathOnly", CapabilityValue::Boolean(true)),
+            ("atomicNoOverwrite", CapabilityValue::Boolean(true)),
+            ("sourceInstanceBound", CapabilityValue::Boolean(true)),
+            ("fileHash", CapabilityValue::Text("sha256".into())),
+            ("canonicalRevisionAdvances", CapabilityValue::Boolean(false)),
+        ],
+    )?;
     insert_feature(
         features,
         "project.checkpoint",
@@ -409,6 +438,30 @@ fn insert_scene_capture_feature(
     )
 }
 
+fn insert_scene_composition_feature(
+    features: &mut BTreeMap<String, FeatureDescriptor>,
+    raw: &Ymm4Capabilities,
+) -> Result<(), CanonicalError> {
+    insert_feature(
+        features,
+        "scene.composition",
+        raw.capabilities
+            .contains(&Ymm4Capability::SceneCompositionCurrent),
+        [
+            ("currentFrameOnly", CapabilityValue::Boolean(true)),
+            (
+                "deterministicOrder",
+                CapabilityValue::Text("layer_then_element_id".into()),
+            ),
+            ("explicitAvailability", CapabilityValue::Boolean(true)),
+            (
+                "geometryUnits",
+                CapabilityValue::Text("integer_pixels".into()),
+            ),
+        ],
+    )
+}
+
 fn insert_feature<I>(
     features: &mut BTreeMap<String, FeatureDescriptor>,
     name: &str,
@@ -557,10 +610,12 @@ mod tests {
                 Ymm4Capability::ManagedCaption,
                 Ymm4Capability::ManagedAudio,
                 Ymm4Capability::UnifiedTargetPlan,
+                Ymm4Capability::TimelineEditManagedCueMixed,
                 Ymm4Capability::MutationProfileYmm4_4_55_1_1,
                 Ymm4Capability::SceneCaptureNativePng,
                 Ymm4Capability::SceneCapturePlayheadRestore,
                 Ymm4Capability::SceneCaptureContentHash,
+                Ymm4Capability::SceneCompositionCurrent,
                 Ymm4Capability::MetadataRemarkDetach,
             ],
         };
@@ -598,6 +653,12 @@ mod tests {
             capture.properties["transientStateRestore"],
             CapabilityValue::Boolean(true)
         );
+        let composition = left.feature("scene.composition").unwrap();
+        assert!(composition.available);
+        assert_eq!(
+            composition.properties["deterministicOrder"],
+            CapabilityValue::Text("layer_then_element_id".into())
+        );
     }
 
     #[test]
@@ -621,6 +682,12 @@ mod tests {
         };
         let capabilities = StructuredYmm4Capabilities::from_bridge(&health(), &raw).unwrap();
         assert!(!capabilities.feature("voiceItem.create").unwrap().available);
+        assert!(
+            !capabilities
+                .feature("timelineEdit.apply")
+                .unwrap()
+                .available
+        );
     }
 
     #[test]
@@ -715,10 +782,12 @@ mod tests {
                 Ymm4Capability::ManagedAudio,
                 Ymm4Capability::ManagedCaption,
                 Ymm4Capability::UnifiedTargetPlan,
+                Ymm4Capability::TimelineEditManagedCueMixed,
                 Ymm4Capability::IdempotentApply,
                 Ymm4Capability::UndoBatch,
                 Ymm4Capability::MutationProfileYmm4_4_55_1_1,
                 Ymm4Capability::ProjectCheckpointVerified,
+                Ymm4Capability::ProjectInitializeSaveAsVerified,
                 Ymm4Capability::NativePortraitUpsert,
                 Ymm4Capability::NativeFaceUpsert,
                 Ymm4Capability::NativeImageUpsert,
@@ -736,13 +805,14 @@ mod tests {
                 Ymm4Capability::SceneCaptureNativePng,
                 Ymm4Capability::SceneCapturePlayheadRestore,
                 Ymm4Capability::SceneCaptureContentHash,
+                Ymm4Capability::SceneCompositionCurrent,
                 Ymm4Capability::MetadataRemarkDetach,
             ],
         };
         let capabilities = StructuredYmm4Capabilities::from_bridge(&health(), &raw).unwrap();
         assert_eq!(
             capabilities.capability_digest,
-            "sha256:8996754be297a75298d9f3b9a0650ba8de7ea0053087546aa2c55a38f8493038"
+            "sha256:d5e733421b19ff855abed7bc9a7bd08c13543411ae8245835c24d17d14465a96"
         );
     }
 }

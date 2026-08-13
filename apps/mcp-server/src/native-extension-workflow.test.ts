@@ -12,6 +12,7 @@ const value = (name) => args[args.indexOf(name) + 1];
 const print = (result) => process.stdout.write(JSON.stringify(result));
 const raw = (byte) => byte.repeat(64);
 if (args[0] === "ymm4" && args[1] === "canonical-head") print({ projectId: "project-1", revision: 0 });
+else if (args[0] === "ymm4" && args[1] === "snapshot") print({ projectId: "project-1", projectName: "test", projectPath: "test.ymmp", sceneId: "scene-1", fps: 60, fingerprint: "f".repeat(64), managedItems: [], nativeExtensions: [], unmanagedContextCount: 0 });
 else if (args[0] === "ymm4" && args[1] === "native-extension-descriptors") print({
   targetCatalog: {
     catalogDigest: raw("a"),

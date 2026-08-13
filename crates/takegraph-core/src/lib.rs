@@ -5,8 +5,10 @@
 
 pub mod managed_cue;
 pub mod native_extension;
+pub mod project_initialization;
 pub mod reconciliation;
 pub mod revision;
+pub mod timeline_edit;
 pub mod voice;
 
 pub use managed_cue::{
@@ -27,6 +29,11 @@ pub use native_extension::{
     PortraitPresentation, PreservationPlan, PreservedNativeField, ReplacementGuard,
     TemplateDescriptor,
 };
+pub use project_initialization::{
+    PROJECT_INITIALIZATION_PLAN_SCHEMA_VERSION, ProjectInitializationDestination,
+    ProjectInitializationMode, ProjectInitializationPlan, ProjectInitializationPlanError,
+    ProjectInitializationSource,
+};
 pub use reconciliation::{
     ManagedFieldDrift, ManagedSemanticIdentity, ManagedSemanticItem, ManagedSemanticValue,
     RECONCILIATION_SCHEMA_VERSION, ReconciliationAction, ReconciliationChoice,
@@ -34,4 +41,8 @@ pub use reconciliation::{
     SemanticDriftEntry, SemanticDriftKind, SemanticDriftReport,
 };
 pub use revision::{Patch, PatchError, PatchId, PatchStatus, RevisionId};
+pub use timeline_edit::{
+    TIMELINE_EDIT_MAX_OPERATIONS, TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TimelineEditError,
+    TimelineEditOperation, TimelineEditPlan,
+};
 pub use voice::{AudioArtifact, VoiceTake, VoiceTakeError, VoiceTakeStatus, VoiceTaskIdentity};

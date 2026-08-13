@@ -12,7 +12,27 @@ use takegraph_node::{
     Ymm4OperationReceipt, Ymm4OperationStatus,
 };
 
+use thiserror::Error;
+
 use crate::{DurableProjectStore, ExternalCommitRecord, ExternalMutationFence, ProjectStoreError};
+
+/// Untitled YMM4 projects cannot stage or apply canonical mutations.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("project has no existing path; Save As is not authorized")]
+pub struct UnsavedProjectError;
+
+/// Refuses canonical stage/apply when YMM4 has not yet saved to a path.
+///
+/// # Errors
+///
+/// Returns [`UnsavedProjectError`] when `project_path` is empty or whitespace.
+pub fn require_existing_project_path(project_path: &str) -> Result<(), UnsavedProjectError> {
+    if project_path.trim().is_empty() {
+        Err(UnsavedProjectError)
+    } else {
+        Ok(())
+    }
+}
 
 /// Result of one canonical-to-YMM durable mutation boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,5 +700,18 @@ mod tests {
             Err(ProjectStoreError::OperationConflict(owner)) if owner == detach_operation
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn untitled_project_path_is_refused() {
+        assert_eq!(require_existing_project_path(""), Err(UnsavedProjectError));
+        assert_eq!(
+            require_existing_project_path("   "),
+            Err(UnsavedProjectError)
+        );
+        assert_eq!(
+            require_existing_project_path("C:\\\\work\\\\a.ymmp"),
+            Ok(())
+        );
     }
 }

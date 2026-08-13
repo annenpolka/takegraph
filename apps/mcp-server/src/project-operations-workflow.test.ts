@@ -19,6 +19,7 @@ const print = (result) => process.stdout.write(JSON.stringify(result));
 const common = { stateRoot: value("--state-root"), operationRoot: value("--operation-root") };
 if (args[0] !== "ymm4") { process.stderr.write("expected ymm4 command"); process.exit(2); }
 if (args[1] === "canonical-head") print({ projectId: "project-1", revision: 0 });
+else if (args[1] === "snapshot") print({ projectId: "project-1", projectName: "test", projectPath: "test.ymmp", sceneId: "scene-1", fps: 60, fingerprint: "f".repeat(64), managedItems: [], nativeExtensions: [], unmanagedContextCount: 0 });
 else if (args[1] === "checkpoint-stage") print({ command: args[1], ...common, head: Number(value("--head")), payload: { request: { operationId: "${checkpointId}" }, status: "staged" } });
 else if (args[1] === "checkpoint-execute") print({ command: args[1], ...common, operationId: value("--operation-id"), head: Number(value("--head")), payload: { status: "verified" } });
 else if (args[1] === "checkpoint-status") print({ command: args[1], operationRoot: value("--operation-root"), operationId: value("--operation-id"), payload: { status: "verified" } });

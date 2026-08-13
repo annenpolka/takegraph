@@ -135,6 +135,84 @@ internal static class ApplyRequestDigest
             Compute(targetPlanRequest),
             "18a5f6cf916dd6250a51ee63dc9a03879f6759c107b2f419b871e84ca31f79fb");
 
+        using var timelineEditPlan = System.Text.Json.JsonDocument.Parse(
+            """
+            {
+              "canonicalVersion": 1,
+              "operationId": "00000000-0000-0000-0000-00000000004d",
+              "baseRevision": 9,
+              "target": {
+                "adapterId": "ymm4-4.55",
+                "projectId": "project-a",
+                "sceneId": "scene-a",
+                "fps": 60,
+                "driverVersion": "4.55.1.1/0.2.0"
+              },
+              "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedScope": {
+                "targetIdentityDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "managedStateDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflictScopeDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              },
+              "changeBudget": {
+                "maxChangedEntities": 1,
+                "maxShiftedEntities": 0,
+                "maxShiftFrames": 0,
+                "allowLockedChanges": false,
+                "allowUnmanagedChanges": false
+              },
+              "operations": [{
+                "kind": "managed_cue",
+                "cue": {
+                  "intent": {
+                    "entityId": "one",
+                    "entityRevision": 1,
+                    "displayText": "caption",
+                    "spokenText": "spoken",
+                    "speakerRole": "speaker",
+                    "voiceProfile": "speaker",
+                    "captionStyle": null,
+                    "segmentationLocked": false,
+                    "placement": {"anchor":{"type":"absolute_frame","frame":12},"ordering":"fixed","trackRole":"dialogue"},
+                    "realizationPreference": "require_portable",
+                    "fallbackPolicy": "reject",
+                    "acceptedPortableTake": null,
+                    "template": null,
+                    "effects": [],
+                    "hardLockPreconditions": []
+                  },
+                  "realizationId": "00000000-0000-0000-0000-000000000001",
+                  "action": "create",
+                  "strategy": "portable_pair",
+                  "fallback": null,
+                  "placement": {"frame":12,"primaryLayer":1,"secondaryLayer":2},
+                  "duration": {"kind":"exact","frames":30},
+                  "ownership": {"strict":["identity","captionText","audioArtifact","timing"],"derived":[],"preserve":["unknownNativeFields"],"global":["projectSettings"]},
+                  "capabilityDependencies": [{"feature":"timelineEdit.apply","minimumVersion":1,"schemaDigest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}],
+                  "bindingDependencies": [{"kind":"audio_artifact","id":"artifact","digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],
+                  "resolvedRealization": {"kind":"portable_pair","audio_path":"audio.wav","artifact_digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+                }
+              }],
+              "warnings": []
+            }
+            """);
+        var timelineEditPlanDigest = CanonicalJson.Sha256(
+            "takegraph-timeline-edit-plan-v1",
+            timelineEditPlan.RootElement);
+        AssertGolden(
+            timelineEditPlanDigest,
+            "sha256:2ac5a436e8d866383cc04a9d8ea02e7b185d3462be53fea9e7a01f25375b739b");
+        var timelineEditRequest = new TimelineEditApplyRequestDto(
+            2,
+            string.Empty,
+            $"sha256:{new string('1', 64)}",
+            timelineEditPlanDigest,
+            timelineEditPlan.RootElement,
+            []);
+        AssertGolden(
+            Compute(timelineEditRequest),
+            "e56f1165f5ff15bf3c1c1377b0aae4c59d31650e7dae7633cb9bc06471582fa0");
+
         var sceneCaptureRequest = new SceneCaptureRequestDto(
             2,
             Guid.Empty,
@@ -163,6 +241,24 @@ internal static class ApplyRequestDigest
         AssertGolden(
             Compute(checkpointRequest),
             "7c4bc2d3d568eeee9ed9e018bc26158f9b8ffc7606373144b6a382771b0c32a5");
+
+        var initializationRequest = new ProjectInitializationRequestDto(
+            2,
+            Guid.Parse("11111111-2222-4333-8444-555555555555"),
+            string.Empty,
+            $"sha256:{new string('1', 64)}",
+            "instance-日本語",
+            "project-untitled",
+            "scene-a",
+            $"sha256:{new string('2', 64)}",
+            @"C:\projects\新規.ymmp",
+            $"sha256:{new string('3', 64)}",
+            "project-saved",
+            $"sha256:{new string('4', 64)}",
+            false);
+        AssertGolden(
+            Compute(initializationRequest),
+            "32bbaf6a44ed11fdfa2c8de61cd6d6ed309047ebaf0d116bfb1add97d0d4b79a");
 
         var renderRequest = new RenderRequestDto(
             2,
@@ -368,6 +464,20 @@ internal static class ApplyRequestDigest
             })["sha256:".Length..];
     }
 
+    internal static string Compute(TimelineEditApplyRequestDto request)
+    {
+        return CanonicalJson.Sha256(
+            "takegraph-ymm4-timeline-edit-request-v1",
+            new
+            {
+                protocolVersion = request.ProtocolVersion,
+                expectedFingerprint = request.ExpectedFingerprint,
+                planDigest = request.PlanDigest,
+                timelineEditPlan = request.TimelineEditPlan,
+                artifacts = request.Artifacts,
+            })["sha256:".Length..];
+    }
+
     internal static string Compute(SceneCaptureRequestDto request)
     {
         var canonical = new StringBuilder("takegraph-ymm4-scene-capture-v2\n");
@@ -423,6 +533,24 @@ internal static class ApplyRequestDigest
         AppendString(canonical, "targetIdentityDigest", request.TargetIdentityDigest);
         AppendString(canonical, "expectedStateDigest", request.ExpectedStateDigest);
         AppendString(canonical, "checkpointProfileDigest", request.CheckpointProfileDigest);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
+    }
+
+    internal static string Compute(ProjectInitializationRequestDto request)
+    {
+        var canonical = new StringBuilder("takegraph-ymm4-project-initialization-v2\n");
+        AppendNumber(canonical, "protocolVersion", request.ProtocolVersion);
+        AppendString(canonical, "operationId", request.OperationId.ToString("D"));
+        AppendString(canonical, "driverProfileDigest", request.DriverProfileDigest);
+        AppendString(canonical, "sourceProjectInstanceId", request.SourceProjectInstanceId);
+        AppendString(canonical, "sourceProjectId", request.SourceProjectId);
+        AppendString(canonical, "sourceSceneId", request.SourceSceneId);
+        AppendString(canonical, "expectedSourceFingerprint", request.ExpectedSourceFingerprint);
+        AppendString(canonical, "destinationPath", request.DestinationPath);
+        AppendString(canonical, "destinationPathDigest", request.DestinationPathDigest);
+        AppendString(canonical, "predictedProjectId", request.PredictedProjectId);
+        AppendString(canonical, "predictedFingerprint", request.PredictedFingerprint);
+        AppendNumber(canonical, "overwrite", request.Overwrite ? 1 : 0);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
     }
 

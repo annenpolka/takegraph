@@ -322,7 +322,7 @@ impl TargetPlan {
     }
 }
 
-fn validate_planned_cue(cue: &PlannedCue) -> Result<(), TargetPlanError> {
+pub(crate) fn validate_planned_cue(cue: &PlannedCue) -> Result<(), TargetPlanError> {
     cue.intent.validate()?;
     if cue.realization_id.is_nil() {
         return invalid_cue(cue, "has an empty realizationId");

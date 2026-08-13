@@ -11,6 +11,7 @@ use takegraph_core::{
 };
 use takegraph_node::{
     Ymm4MetadataDetachReceipt, Ymm4NativeExtensionApplyResponse, Ymm4OperationReceipt,
+    Ymm4TimelineEditReceipt,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -19,6 +20,50 @@ const PROJECT_STATE_SCHEMA_VERSION: u32 = 3;
 const MINIMUM_PROJECT_STATE_SCHEMA_VERSION: u32 = 1;
 const STATE_PREFIX: &str = "state-";
 const STATE_SUFFIX: &str = ".json";
+const INITIALIZATION_RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// Durable project-scoped initialization reservation. It fences every legacy
+/// lazy-bootstrap entry point while a Save As may have succeeded but canonical
+/// generation zero has not yet been acknowledged by the owning task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectInitializationReservation {
+    pub operation_id: Uuid,
+    pub plan_digest: String,
+    pub project_id: String,
+    pub bootstrap_revision: RevisionId,
+    pub status: ProjectInitializationReservationStatus,
+    pub canonical_state_digest: Option<String>,
+}
+
+/// Project-scoped reservation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectInitializationReservationStatus {
+    Reserved,
+    Completed,
+    Cancelled,
+}
+
+/// Result of acquiring an explicit initializer reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectInitializationReservationOutcome {
+    Reserved,
+    ReservationReplayed,
+    BootstrapPublishedPartial,
+    CompletedReplayed,
+    AlreadyInitialized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectInitializationReservationRecord {
+    schema_version: u32,
+    generation: u64,
+    previous_record_digest: Option<String>,
+    payload: ProjectInitializationReservation,
+    record_digest: String,
+}
 
 /// Durable canonical project state. Each successful commit writes a new,
 /// immutable generation so a crash cannot destroy the preceding revision.
@@ -185,6 +230,25 @@ impl VerifiedManagedStateUpdate {
         Ok(update)
     }
 
+    pub(crate) fn replacing_entities_from_timeline_receipt(
+        entity_ids: impl IntoIterator<Item = String>,
+        receipt: &Ymm4TimelineEditReceipt,
+    ) -> Result<Self, ProjectStoreError> {
+        let update = Self {
+            source_receipt_digest: canonical_sha256("takegraph-external-receipt", receipt)?,
+            replace_entity_ids: entity_ids.into_iter().collect(),
+            replace_identities: BTreeSet::new(),
+            require_existing_identities: false,
+            items: receipt
+                .applied_items
+                .iter()
+                .map(crate::managed_projection::project_managed_item)
+                .collect(),
+        };
+        validate_managed_update(&update)?;
+        Ok(update)
+    }
+
     pub(crate) fn replacing_identities_from_receipt(
         identities: impl IntoIterator<Item = ManagedSemanticIdentity>,
         receipt: &Ymm4OperationReceipt,
@@ -287,23 +351,314 @@ impl Drop for ExternalMutationFence {
 }
 
 impl DurableProjectStore {
+    fn scoped(
+        shared_root: impl AsRef<Path>,
+        project_id: impl Into<String>,
+    ) -> Result<Self, ProjectStoreError> {
+        let project_id = project_id.into();
+        if project_id.trim().is_empty() {
+            return Err(ProjectStoreError::EmptyField("projectId"));
+        }
+        let digest = canonical_sha256("takegraph-project-store-key", &project_id)?;
+        let directory = digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| ProjectStoreError::Corrupt("invalid project key digest".into()))?;
+        Ok(Self {
+            root: shared_root.as_ref().join(directory),
+            project_id,
+        })
+    }
+
     /// Returns the canonical project identity bound to this store.
     #[must_use]
     pub fn project_id(&self) -> &str {
         &self.project_id
     }
 
-    /// Opens a project beneath a shared store root using a content-addressed
-    /// directory name, avoiding any path interpretation of the project ID.
+    /// Opens an explicitly initialized project beneath a shared store root
+    /// using a content-addressed directory name, avoiding any path
+    /// interpretation of the project ID.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid identity, canonicalization, I/O, or corrupt state.
+    /// Returns an error when the project has not been explicitly initialized,
+    /// or for invalid identity, canonicalization, I/O, or corrupt state.
     pub fn open_scoped(
         shared_root: impl AsRef<Path>,
         project_id: impl Into<String>,
     ) -> Result<Self, ProjectStoreError> {
-        Self::open_scoped_or_bootstrap(shared_root, project_id, RevisionId(0))
+        let store = Self::scoped(shared_root, project_id)?;
+        if !store.revisions_path().is_dir() {
+            return Err(ProjectStoreError::NotInitialized {
+                project_id: store.project_id,
+            });
+        }
+        if store
+            .load_initialization_reservation_unlocked()?
+            .is_some_and(|record| {
+                record.payload.status == ProjectInitializationReservationStatus::Reserved
+            })
+        {
+            return Err(ProjectStoreError::InitializationReserved);
+        }
+        if store.load_latest_unlocked()?.is_none() {
+            return Err(ProjectStoreError::NotInitialized {
+                project_id: store.project_id,
+            });
+        }
+        Ok(store)
+    }
+
+    /// Observes an already-initialized scoped project without creating a
+    /// directory, lock file, or bootstrap generation.
+    ///
+    /// Append-only generations are atomically published, so a lock-free reader
+    /// sees either the previous complete generation or the next complete one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identity, I/O, or corrupt published state.
+    pub fn observe_scoped(
+        shared_root: impl AsRef<Path>,
+        project_id: impl Into<String>,
+    ) -> Result<Option<DurableProjectState>, ProjectStoreError> {
+        let project_id = project_id.into();
+        if project_id.trim().is_empty() {
+            return Err(ProjectStoreError::EmptyField("projectId"));
+        }
+        let digest = canonical_sha256("takegraph-project-store-key", &project_id)?;
+        let directory = digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| ProjectStoreError::Corrupt("invalid project key digest".into()))?;
+        let store = Self {
+            root: shared_root.as_ref().join(directory),
+            project_id,
+        };
+        if !store.revisions_path().is_dir() {
+            return Ok(None);
+        }
+        if store
+            .load_initialization_reservation_unlocked()?
+            .is_some_and(|record| {
+                record.payload.status == ProjectInitializationReservationStatus::Reserved
+            })
+        {
+            return Err(ProjectStoreError::InitializationReserved);
+        }
+        store.load_latest_unlocked()
+    }
+
+    /// Acquires or replays a project-scoped initialization reservation. Every
+    /// ordinary bootstrap path observes this record under the same project
+    /// lock and refuses to create/open state until the owning operation marks
+    /// it complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a conflicting initializer, corrupt state/journal,
+    /// invalid identity, or I/O failure.
+    pub fn reserve_scoped_initialization(
+        shared_root: impl AsRef<Path>,
+        project_id: impl Into<String>,
+        operation_id: Uuid,
+        plan_digest: impl Into<String>,
+        bootstrap_revision: RevisionId,
+    ) -> Result<(Self, ProjectInitializationReservationOutcome), ProjectStoreError> {
+        let store = Self::scoped(shared_root, project_id)?;
+        let plan_digest = plan_digest.into();
+        if operation_id.is_nil() {
+            return Err(ProjectStoreError::InvalidInitializationReservation(
+                "operationId is nil".into(),
+            ));
+        }
+        if !is_sha256_digest(&plan_digest) {
+            return Err(ProjectStoreError::InvalidInitializationReservation(
+                "planDigest is not SHA-256".into(),
+            ));
+        }
+        fs::create_dir_all(store.revisions_path())?;
+        let outcome = store.with_lock(|store| {
+            let current = store.load_initialization_reservation_unlocked()?;
+            if let Some(record) = current.as_ref() {
+                validate_initialization_reservation(&record.payload, &store.project_id)?;
+                return match record.payload.status {
+                    ProjectInitializationReservationStatus::Reserved => {
+                        if record.payload.operation_id != operation_id
+                            || record.payload.plan_digest != plan_digest
+                            || record.payload.bootstrap_revision != bootstrap_revision
+                        {
+                            Err(ProjectStoreError::InitializationConflict {
+                                operation_id: record.payload.operation_id,
+                            })
+                        } else if let Some(state) = store.load_latest_unlocked()? {
+                            validate_initialization_baseline(
+                                &state,
+                                record.payload.bootstrap_revision,
+                            )?;
+                            Ok(ProjectInitializationReservationOutcome::BootstrapPublishedPartial)
+                        } else {
+                            Ok(ProjectInitializationReservationOutcome::ReservationReplayed)
+                        }
+                    }
+                    ProjectInitializationReservationStatus::Completed => {
+                        if record.payload.operation_id == operation_id
+                            && record.payload.plan_digest == plan_digest
+                            && record.payload.bootstrap_revision == bootstrap_revision
+                        {
+                            Ok(ProjectInitializationReservationOutcome::CompletedReplayed)
+                        } else {
+                            Ok(ProjectInitializationReservationOutcome::AlreadyInitialized)
+                        }
+                    }
+                    ProjectInitializationReservationStatus::Cancelled => {
+                        if store.load_latest_unlocked()?.is_some() {
+                            Ok(ProjectInitializationReservationOutcome::AlreadyInitialized)
+                        } else {
+                            let payload = ProjectInitializationReservation {
+                                operation_id,
+                                plan_digest,
+                                project_id: store.project_id.clone(),
+                                bootstrap_revision,
+                                status: ProjectInitializationReservationStatus::Reserved,
+                                canonical_state_digest: None,
+                            };
+                            store.append_initialization_reservation_unlocked(
+                                &payload,
+                                Some(record.generation),
+                            )?;
+                            Ok(ProjectInitializationReservationOutcome::Reserved)
+                        }
+                    }
+                };
+            }
+            if store.load_latest_unlocked()?.is_some() {
+                return Ok(ProjectInitializationReservationOutcome::AlreadyInitialized);
+            }
+            let payload = ProjectInitializationReservation {
+                operation_id,
+                plan_digest,
+                project_id: store.project_id.clone(),
+                bootstrap_revision,
+                status: ProjectInitializationReservationStatus::Reserved,
+                canonical_state_digest: None,
+            };
+            store.append_initialization_reservation_unlocked(&payload, None)?;
+            Ok(ProjectInitializationReservationOutcome::Reserved)
+        })?;
+        Ok((store, outcome))
+    }
+
+    /// Publishes generation zero for the exact reserved operation and marks
+    /// the reservation completed. If a crash occurred after publication but
+    /// before the completion record, the still-reserved exact binding proves
+    /// ownership and makes retry safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing/conflicting reservation, unexpected state,
+    /// corruption, or I/O failure.
+    pub fn complete_reserved_initialization(
+        &self,
+        operation_id: Uuid,
+        plan_digest: &str,
+    ) -> Result<ProjectInitializationReservationOutcome, ProjectStoreError> {
+        self.with_lock(|store| {
+            let record = store
+                .load_initialization_reservation_unlocked()?
+                .ok_or(ProjectStoreError::MissingInitializationReservation)?;
+            validate_initialization_reservation(&record.payload, &store.project_id)?;
+            if record.payload.operation_id != operation_id
+                || record.payload.plan_digest != plan_digest
+            {
+                return Err(ProjectStoreError::InitializationConflict {
+                    operation_id: record.payload.operation_id,
+                });
+            }
+            if record.payload.status == ProjectInitializationReservationStatus::Completed {
+                let state = store.load_latest_unlocked()?.ok_or_else(|| {
+                    ProjectStoreError::Corrupt(
+                        "completed initialization has no canonical state".into(),
+                    )
+                })?;
+                if record.payload.canonical_state_digest.as_deref()
+                    != Some(state.state_digest.as_str())
+                {
+                    return Err(ProjectStoreError::Corrupt(
+                        "completed initialization does not bind canonical state".into(),
+                    ));
+                }
+                return Ok(ProjectInitializationReservationOutcome::CompletedReplayed);
+            }
+            if record.payload.status != ProjectInitializationReservationStatus::Reserved {
+                return Err(ProjectStoreError::InvalidInitializationReservation(
+                    "cancelled initialization cannot be completed".into(),
+                ));
+            }
+
+            let state = if let Some(state) = store.load_latest_unlocked()? {
+                validate_initialization_baseline(&state, record.payload.bootstrap_revision)?;
+                state
+            } else {
+                store.persist_unlocked(DurableProjectState {
+                    schema_version: PROJECT_STATE_SCHEMA_VERSION,
+                    project_id: store.project_id.clone(),
+                    generation: 0,
+                    previous_state_digest: None,
+                    bootstrap_revision: record.payload.bootstrap_revision,
+                    head: record.payload.bootstrap_revision,
+                    target_links: BTreeMap::new(),
+                    external_commits: BTreeMap::new(),
+                    managed_target_states: BTreeMap::new(),
+                    pending_external_commit: None,
+                    state_digest: String::new(),
+                })?;
+                store.load_latest_unlocked()?.ok_or_else(|| {
+                    ProjectStoreError::Corrupt(
+                        "initializer failed to publish canonical baseline".into(),
+                    )
+                })?
+            };
+            let mut completed = record.payload;
+            completed.status = ProjectInitializationReservationStatus::Completed;
+            completed.canonical_state_digest = Some(state.state_digest);
+            store
+                .append_initialization_reservation_unlocked(&completed, Some(record.generation))?;
+            Ok(ProjectInitializationReservationOutcome::Reserved)
+        })
+    }
+
+    /// Cancels an exact reservation before any target write. This is used only
+    /// for read-only adoption when the source changes between preflight and the
+    /// project-lock barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reservation is missing, belongs to another
+    /// operation or digest, is no longer active, or canonical state exists.
+    pub fn cancel_reserved_initialization(
+        &self,
+        operation_id: Uuid,
+        plan_digest: &str,
+    ) -> Result<(), ProjectStoreError> {
+        self.with_lock(|store| {
+            let record = store
+                .load_initialization_reservation_unlocked()?
+                .ok_or(ProjectStoreError::MissingInitializationReservation)?;
+            if record.payload.operation_id != operation_id
+                || record.payload.plan_digest != plan_digest
+                || record.payload.status != ProjectInitializationReservationStatus::Reserved
+                || store.load_latest_unlocked()?.is_some()
+            {
+                return Err(ProjectStoreError::InvalidInitializationReservation(
+                    "reservation is not safely cancellable".into(),
+                ));
+            }
+            let mut cancelled = record.payload;
+            cancelled.status = ProjectInitializationReservationStatus::Cancelled;
+            store
+                .append_initialization_reservation_unlocked(&cancelled, Some(record.generation))?;
+            Ok(())
+        })
     }
 
     /// Opens a content-addressed project directory or initializes its explicit
@@ -317,19 +672,24 @@ impl DurableProjectStore {
         project_id: impl Into<String>,
         bootstrap_revision: RevisionId,
     ) -> Result<Self, ProjectStoreError> {
-        let project_id = project_id.into();
-        if project_id.trim().is_empty() {
-            return Err(ProjectStoreError::EmptyField("projectId"));
-        }
-        let digest = canonical_sha256("takegraph-project-store-key", &project_id)?;
-        let directory = digest
-            .strip_prefix("sha256:")
-            .ok_or_else(|| ProjectStoreError::Corrupt("invalid project key digest".into()))?;
-        Self::open_or_bootstrap(
-            shared_root.as_ref().join(directory),
-            project_id,
-            bootstrap_revision,
-        )
+        Self::open_scoped_or_bootstrap_with_outcome(shared_root, project_id, bootstrap_revision)
+            .map(|(store, _created)| store)
+    }
+
+    /// Opens a scoped store and reports whether this call atomically published
+    /// its generation-zero baseline. Concurrent initializers serialize on the
+    /// project lock, so exactly one caller observes `created == true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identity, I/O, or corrupt existing state.
+    pub fn open_scoped_or_bootstrap_with_outcome(
+        shared_root: impl AsRef<Path>,
+        project_id: impl Into<String>,
+        bootstrap_revision: RevisionId,
+    ) -> Result<(Self, bool), ProjectStoreError> {
+        let store = Self::scoped(shared_root, project_id)?;
+        Self::open_or_bootstrap_with_outcome(store.root, store.project_id, bootstrap_revision)
     }
 
     /// Opens or initializes a project-specific canonical store.
@@ -357,6 +717,15 @@ impl DurableProjectStore {
         project_id: impl Into<String>,
         bootstrap_revision: RevisionId,
     ) -> Result<Self, ProjectStoreError> {
+        Self::open_or_bootstrap_with_outcome(root, project_id, bootstrap_revision)
+            .map(|(store, _created)| store)
+    }
+
+    fn open_or_bootstrap_with_outcome(
+        root: impl AsRef<Path>,
+        project_id: impl Into<String>,
+        bootstrap_revision: RevisionId,
+    ) -> Result<(Self, bool), ProjectStoreError> {
         let project_id = project_id.into();
         if project_id.trim().is_empty() {
             return Err(ProjectStoreError::EmptyField("projectId"));
@@ -366,7 +735,15 @@ impl DurableProjectStore {
             project_id,
         };
         fs::create_dir_all(store.revisions_path())?;
-        store.with_lock(|store| {
+        let created = store.with_lock(|store| {
+            if store
+                .load_initialization_reservation_unlocked()?
+                .is_some_and(|record| {
+                    record.payload.status == ProjectInitializationReservationStatus::Reserved
+                })
+            {
+                return Err(ProjectStoreError::InitializationReserved);
+            }
             if store.load_latest_unlocked()?.is_none() {
                 store.persist_unlocked(DurableProjectState {
                     schema_version: PROJECT_STATE_SCHEMA_VERSION,
@@ -381,10 +758,11 @@ impl DurableProjectStore {
                     pending_external_commit: None,
                     state_digest: String::new(),
                 })?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         })?;
-        Ok(store)
+        Ok((store, created))
     }
 
     /// Returns the durable canonical head after validating the latest generation.
@@ -843,6 +1221,39 @@ impl DurableProjectStore {
     ///
     /// Returns an error for a changed operation/request binding, a detach
     /// reservation, or corrupt durable state.
+    /// Releases one operator-acknowledged unresolved reservation.
+    ///
+    /// This does not advance HEAD and does not claim rollback or verification.
+    /// A missing reservation is already released. A reservation owned by a
+    /// different operation or a metadata-detach child is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a reservation owned by another operation, a detach
+    /// reservation, or corrupt durable state.
+    pub fn acknowledge_recovery_required_reservation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<(), ProjectStoreError> {
+        self.with_lock(|store| {
+            let mut state = store
+                .load_latest_unlocked()?
+                .ok_or_else(|| ProjectStoreError::Corrupt("initialized state is missing".into()))?;
+            let Some(pending) = &state.pending_external_commit else {
+                return Ok(());
+            };
+            if pending.operation_id != operation_id {
+                return Err(ProjectStoreError::ExternalCommitReserved(
+                    pending.operation_id,
+                ));
+            }
+            if pending.kind != PendingExternalCommitKind::ExternalMutation {
+                return Err(ProjectStoreError::OperationConflict(operation_id));
+            }
+            publish_reserved_state(store, &mut state, None)
+        })
+    }
+
     pub(crate) fn abort_external_commit_reservation(
         &self,
         operation_id: Uuid,
@@ -1046,6 +1457,129 @@ impl DurableProjectStore {
         self.root.join("revisions")
     }
 
+    fn initialization_generations_path(&self) -> PathBuf {
+        self.root.join("initialization").join("generations")
+    }
+
+    fn append_initialization_reservation_unlocked(
+        &self,
+        payload: &ProjectInitializationReservation,
+        expected_generation: Option<u64>,
+    ) -> Result<ProjectInitializationReservationRecord, ProjectStoreError> {
+        validate_initialization_reservation(payload, &self.project_id)?;
+        let current = self.load_initialization_reservation_unlocked()?;
+        let actual_generation = current.as_ref().map(|record| record.generation);
+        if actual_generation != expected_generation {
+            return Err(ProjectStoreError::InitializationJournalChanged {
+                expected: expected_generation,
+                actual: actual_generation,
+            });
+        }
+        let generation = current.as_ref().map_or(Ok(0), |record| {
+            record
+                .generation
+                .checked_add(1)
+                .ok_or(ProjectStoreError::GenerationOverflow)
+        })?;
+        let previous_record_digest = current.map(|record| record.record_digest);
+        let record_digest =
+            initialization_record_digest(generation, previous_record_digest.as_deref(), payload)?;
+        let record = ProjectInitializationReservationRecord {
+            schema_version: INITIALIZATION_RECORD_SCHEMA_VERSION,
+            generation,
+            previous_record_digest,
+            payload: payload.clone(),
+            record_digest,
+        };
+        let generations = self.initialization_generations_path();
+        fs::create_dir_all(&generations)?;
+        let final_path = generations.join(format!(
+            "record-{generation:020}-{}.json",
+            record.record_digest.trim_start_matches("sha256:")
+        ));
+        let temporary_path = generations.join(format!(".record-{}.tmp", Uuid::new_v4()));
+        let write_result = (|| -> Result<(), ProjectStoreError> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary_path)?;
+            file.write_all(&serde_json::to_vec_pretty(&record)?)?;
+            file.sync_all()?;
+            fs::rename(&temporary_path, &final_path)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        write_result?;
+        Ok(record)
+    }
+
+    fn load_initialization_reservation_unlocked(
+        &self,
+    ) -> Result<Option<ProjectInitializationReservationRecord>, ProjectStoreError> {
+        let generations = self.initialization_generations_path();
+        if !generations.is_dir() {
+            return Ok(None);
+        }
+        let mut paths = fs::read_dir(generations)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("record-") && name.ends_with(".json")
+                })
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut previous = None;
+        let mut latest = None;
+        for (expected_generation, path) in paths.into_iter().enumerate() {
+            let mut bytes = Vec::new();
+            File::open(&path)?.read_to_end(&mut bytes)?;
+            let record: ProjectInitializationReservationRecord = serde_json::from_slice(&bytes)
+                .map_err(|error| {
+                    ProjectStoreError::Corrupt(format!(
+                        "invalid initialization journal {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            let expected_generation = u64::try_from(expected_generation)
+                .map_err(|_| ProjectStoreError::GenerationOverflow)?;
+            if record.schema_version != INITIALIZATION_RECORD_SCHEMA_VERSION
+                || record.generation != expected_generation
+                || record.previous_record_digest != previous
+            {
+                return Err(ProjectStoreError::Corrupt(format!(
+                    "broken initialization journal chain at {}",
+                    path.display()
+                )));
+            }
+            validate_initialization_reservation(&record.payload, &self.project_id)?;
+            let digest = initialization_record_digest(
+                record.generation,
+                record.previous_record_digest.as_deref(),
+                &record.payload,
+            )?;
+            if digest != record.record_digest
+                || !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .contains(record.record_digest.trim_start_matches("sha256:"))
+                })
+            {
+                return Err(ProjectStoreError::Corrupt(format!(
+                    "initialization journal digest mismatch at {}",
+                    path.display()
+                )));
+            }
+            previous = Some(record.record_digest.clone());
+            latest = Some(record);
+        }
+        Ok(latest)
+    }
+
     fn load_latest_unlocked(&self) -> Result<Option<DurableProjectState>, ProjectStoreError> {
         let revisions = self.revisions_path();
         let mut candidates = Vec::new();
@@ -1132,6 +1666,25 @@ impl DurableProjectStore {
     }
 }
 
+fn validate_initialization_baseline(
+    state: &DurableProjectState,
+    bootstrap_revision: RevisionId,
+) -> Result<(), ProjectStoreError> {
+    if state.generation != 0
+        || state.bootstrap_revision != bootstrap_revision
+        || state.head != bootstrap_revision
+        || !state.target_links.is_empty()
+        || !state.external_commits.is_empty()
+        || !state.managed_target_states.is_empty()
+        || state.pending_external_commit.is_some()
+    {
+        return Err(ProjectStoreError::Corrupt(
+            "reserved initializer found non-baseline canonical state".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn state_digest(state: &DurableProjectState) -> Result<String, CanonicalError> {
     if state.schema_version == 1 {
         let external_commits = state
@@ -1197,6 +1750,53 @@ fn state_digest(state: &DurableProjectState) -> Result<String, CanonicalError> {
             },
         )
     }
+}
+
+fn initialization_record_digest(
+    generation: u64,
+    previous_record_digest: Option<&str>,
+    payload: &ProjectInitializationReservation,
+) -> Result<String, CanonicalError> {
+    canonical_sha256(
+        "takegraph-project-initialization-reservation-record-v1",
+        &(
+            INITIALIZATION_RECORD_SCHEMA_VERSION,
+            generation,
+            previous_record_digest,
+            payload,
+        ),
+    )
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn validate_initialization_reservation(
+    reservation: &ProjectInitializationReservation,
+    project_id: &str,
+) -> Result<(), ProjectStoreError> {
+    if reservation.operation_id.is_nil()
+        || reservation.project_id != project_id
+        || !is_sha256_digest(&reservation.plan_digest)
+        || (matches!(
+            reservation.status,
+            ProjectInitializationReservationStatus::Reserved
+                | ProjectInitializationReservationStatus::Cancelled
+        ) && reservation.canonical_state_digest.is_some())
+        || (reservation.status == ProjectInitializationReservationStatus::Completed
+            && !reservation
+                .canonical_state_digest
+                .as_deref()
+                .is_some_and(is_sha256_digest))
+    {
+        return Err(ProjectStoreError::InvalidInitializationReservation(
+            "reservation fields are inconsistent".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_state(
@@ -1639,6 +2239,25 @@ struct StateDigestPayloadV3<'a> {
 pub enum ProjectStoreError {
     #[error("required project-store field is empty: {0}")]
     EmptyField(&'static str),
+    #[error(
+        "canonical project is not initialized: {project_id}; stage and approve project_initialization first"
+    )]
+    NotInitialized { project_id: String },
+    #[error("canonical project initialization is reserved by another durable task")]
+    InitializationReserved,
+    #[error("canonical project initialization reservation is missing")]
+    MissingInitializationReservation,
+    #[error("canonical project initialization conflicts with operation {operation_id}")]
+    InitializationConflict { operation_id: Uuid },
+    #[error("canonical project initialization reservation is invalid: {0}")]
+    InvalidInitializationReservation(String),
+    #[error(
+        "canonical initialization journal changed concurrently (expected {expected:?}, got {actual:?})"
+    )]
+    InitializationJournalChanged {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
     #[error("canonical project state is corrupt: {0}")]
     Corrupt(String),
     #[error("project revision is stale: expected {expected:?}, got {actual:?}")]
@@ -1694,6 +2313,330 @@ mod tests {
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(format!("takegraph-project-store-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn scoped_open_requires_explicit_initialization() {
+        let root = test_root();
+        assert_eq!(
+            DurableProjectStore::observe_scoped(&root, "project-observe").unwrap(),
+            None
+        );
+        assert!(!root.exists());
+        assert!(matches!(
+            DurableProjectStore::open_scoped(&root, "project-observe"),
+            Err(ProjectStoreError::NotInitialized { .. })
+        ));
+        assert!(!root.exists());
+
+        // The legacy migration primitive is explicit and is never used by a
+        // normal CLI workflow. New projects use the approved reservation path.
+        DurableProjectStore::open_scoped_or_bootstrap(&root, "project-observe", RevisionId(0))
+            .unwrap();
+        let store = DurableProjectStore::open_scoped(&root, "project-observe").unwrap();
+        assert_eq!(store.head().unwrap(), RevisionId(0));
+        assert_eq!(
+            DurableProjectStore::observe_scoped(&root, "project-observe")
+                .unwrap()
+                .map(|state| state.head),
+            Some(RevisionId(0))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_initialization_reservation_fences_lazy_bootstrap_and_replays() {
+        let root = test_root();
+        let operation_id = Uuid::new_v4();
+        let plan_digest = format!("sha256:{}", "a".repeat(64));
+        let (store, outcome) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-init",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(outcome, ProjectInitializationReservationOutcome::Reserved);
+        assert!(matches!(
+            DurableProjectStore::open_scoped_or_bootstrap(&root, "project-init", RevisionId(0)),
+            Err(ProjectStoreError::InitializationReserved)
+        ));
+        assert!(matches!(
+            DurableProjectStore::observe_scoped(&root, "project-init"),
+            Err(ProjectStoreError::InitializationReserved)
+        ));
+
+        assert_eq!(
+            store
+                .complete_reserved_initialization(operation_id, &plan_digest)
+                .unwrap(),
+            ProjectInitializationReservationOutcome::Reserved
+        );
+        assert_eq!(store.head().unwrap(), RevisionId(0));
+        assert_eq!(
+            store
+                .complete_reserved_initialization(operation_id, &plan_digest)
+                .unwrap(),
+            ProjectInitializationReservationOutcome::CompletedReplayed
+        );
+        assert_eq!(
+            DurableProjectStore::reserve_scoped_initialization(
+                &root,
+                "project-init",
+                operation_id,
+                &plan_digest,
+                RevisionId(0),
+            )
+            .unwrap()
+            .1,
+            ProjectInitializationReservationOutcome::CompletedReplayed
+        );
+    }
+
+    #[test]
+    fn explicit_initialization_rejects_competing_operation() {
+        let root = test_root();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-race",
+            first,
+            &digest,
+            RevisionId(0),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            DurableProjectStore::reserve_scoped_initialization(
+                &root,
+                "project-race",
+                second,
+                &digest,
+                RevisionId(0),
+            ),
+            Err(ProjectStoreError::InitializationConflict { operation_id }) if operation_id == first
+        ));
+    }
+
+    #[test]
+    fn initialization_reservation_survives_reopen_and_exact_owner_replays() {
+        let root = test_root();
+        let operation_id = Uuid::new_v4();
+        let competing_operation_id = Uuid::new_v4();
+        let plan_digest = format!("sha256:{}", "c".repeat(64));
+        let (store, outcome) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-restart",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(outcome, ProjectInitializationReservationOutcome::Reserved);
+        drop(store);
+
+        let (reopened, replay) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-restart",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(
+            replay,
+            ProjectInitializationReservationOutcome::ReservationReplayed
+        );
+        assert!(matches!(
+            DurableProjectStore::reserve_scoped_initialization(
+                &root,
+                "project-restart",
+                competing_operation_id,
+                &plan_digest,
+                RevisionId(0),
+            ),
+            Err(ProjectStoreError::InitializationConflict { operation_id: owner })
+                if owner == operation_id
+        ));
+        assert!(matches!(
+            DurableProjectStore::open_scoped_or_bootstrap(&root, "project-restart", RevisionId(0),),
+            Err(ProjectStoreError::InitializationReserved)
+        ));
+
+        reopened
+            .complete_reserved_initialization(operation_id, &plan_digest)
+            .unwrap();
+        drop(reopened);
+        let (completed, replay) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-restart",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(
+            replay,
+            ProjectInitializationReservationOutcome::CompletedReplayed
+        );
+        assert_eq!(completed.head().unwrap(), RevisionId(0));
+        assert_eq!(
+            DurableProjectStore::reserve_scoped_initialization(
+                &root,
+                "project-restart",
+                competing_operation_id,
+                &plan_digest,
+                RevisionId(0),
+            )
+            .unwrap()
+            .1,
+            ProjectInitializationReservationOutcome::AlreadyInitialized
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn initializer_recovers_crash_between_baseline_and_completion_record() {
+        let root = test_root();
+        let operation_id = Uuid::new_v4();
+        let plan_digest = format!("sha256:{}", "e".repeat(64));
+        let (store, outcome) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-publication-crash",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(outcome, ProjectInitializationReservationOutcome::Reserved);
+
+        // Model a process crash after generation zero was atomically renamed
+        // but before the reservation's Completed generation was appended.
+        store
+            .with_lock(|store| {
+                store.persist_unlocked(DurableProjectState {
+                    schema_version: PROJECT_STATE_SCHEMA_VERSION,
+                    project_id: "project-publication-crash".into(),
+                    generation: 0,
+                    previous_state_digest: None,
+                    bootstrap_revision: RevisionId(0),
+                    head: RevisionId(0),
+                    target_links: BTreeMap::new(),
+                    external_commits: BTreeMap::new(),
+                    managed_target_states: BTreeMap::new(),
+                    pending_external_commit: None,
+                    state_digest: String::new(),
+                })
+            })
+            .unwrap();
+        drop(store);
+
+        let (reopened, replay) = DurableProjectStore::reserve_scoped_initialization(
+            &root,
+            "project-publication-crash",
+            operation_id,
+            &plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(
+            replay,
+            ProjectInitializationReservationOutcome::BootstrapPublishedPartial
+        );
+        reopened
+            .complete_reserved_initialization(operation_id, &plan_digest)
+            .unwrap();
+        assert_eq!(reopened.snapshot().unwrap().generation, 0);
+        let published_states = fs::read_dir(reopened.revisions_path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STATE_PREFIX)
+            })
+            .count();
+        assert_eq!(
+            published_states, 1,
+            "retry must not republish generation zero"
+        );
+        assert_eq!(
+            reopened
+                .complete_reserved_initialization(operation_id, &plan_digest)
+                .unwrap(),
+            ProjectInitializationReservationOutcome::CompletedReplayed
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_initializer_and_legacy_bootstrap_are_serialized() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let root = test_root();
+        let operation_id = Uuid::new_v4();
+        let plan_digest = format!("sha256:{}", "d".repeat(64));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let reservation_root = root.clone();
+        let reservation_barrier = Arc::clone(&barrier);
+        let reservation_digest = plan_digest.clone();
+        let reservation = thread::spawn(move || {
+            reservation_barrier.wait();
+            DurableProjectStore::reserve_scoped_initialization(
+                reservation_root,
+                "project-bootstrap-race",
+                operation_id,
+                reservation_digest,
+                RevisionId(0),
+            )
+        });
+        let bootstrap_root = root.clone();
+        let bootstrap = thread::spawn(move || {
+            barrier.wait();
+            DurableProjectStore::open_scoped_or_bootstrap_with_outcome(
+                bootstrap_root,
+                "project-bootstrap-race",
+                RevisionId(0),
+            )
+        });
+
+        let reservation = reservation.join().unwrap();
+        let bootstrap = bootstrap.join().unwrap();
+        match (reservation, bootstrap) {
+            (
+                Ok((store, ProjectInitializationReservationOutcome::Reserved)),
+                Err(ProjectStoreError::InitializationReserved),
+            ) => {
+                store
+                    .complete_reserved_initialization(operation_id, &plan_digest)
+                    .unwrap();
+            }
+            (
+                Ok((store, ProjectInitializationReservationOutcome::AlreadyInitialized)),
+                Ok((bootstrapped, true)),
+            ) => {
+                assert_eq!(store.head().unwrap(), RevisionId(0));
+                assert_eq!(bootstrapped.head().unwrap(), RevisionId(0));
+            }
+            (reservation, bootstrap) => {
+                panic!(
+                    "unexpected initialization race result: reservation={reservation:?}, bootstrap={bootstrap:?}"
+                );
+            }
+        }
+
+        let state = DurableProjectStore::observe_scoped(&root, "project-bootstrap-race")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.generation, 0);
+        assert_eq!(state.head, RevisionId(0));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn proof(operation_id: Uuid, request_digest: &str) -> VerifiedExternalCommit {
@@ -2091,6 +3034,47 @@ mod tests {
             reopened.commit_verified_external(&proof).unwrap(),
             RevisionId(1)
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn operator_ack_releases_unresolved_external_reservation_without_advancing_head() {
+        let root = test_root();
+        let operation_id = Uuid::new_v4();
+        let proof = proof(operation_id, "request-a");
+        let store = DurableProjectStore::open(&root, "project-a").unwrap();
+        store
+            .reserve_external_commit(
+                operation_id,
+                proof.base_revision,
+                &proof.patch_digest,
+                &proof.request_digest,
+                &proof.target,
+            )
+            .unwrap();
+        assert_eq!(store.head().unwrap(), RevisionId(0));
+        store
+            .acknowledge_recovery_required_reservation(operation_id)
+            .unwrap();
+        assert!(store.snapshot().unwrap().pending_external_commit.is_none());
+        assert_eq!(store.head().unwrap(), RevisionId(0));
+        store
+            .acknowledge_recovery_required_reservation(operation_id)
+            .unwrap();
+        let other = Uuid::new_v4();
+        store
+            .reserve_external_commit(
+                other,
+                proof.base_revision,
+                "other-patch",
+                "other-request",
+                &proof.target,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.acknowledge_recovery_required_reservation(operation_id),
+            Err(ProjectStoreError::ExternalCommitReserved(id)) if id == other
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

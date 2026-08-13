@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod native_extension;
 pub mod project_operations;
 pub mod reconciliation;
+pub mod scene_composition;
 pub mod scene_inspection;
 pub mod voicevox;
 pub mod ymm4;
@@ -36,6 +37,12 @@ pub use reconciliation::{
     Ymm4MetadataDetachStatus, verify_metadata_detach, verify_metadata_detach_not_started,
     verify_metadata_detach_rollback,
 };
+pub use scene_composition::{
+    YMM4_SCENE_COMPOSITION_SCHEMA_VERSION, Ymm4CompositionAvailability,
+    Ymm4CompositionCompleteness, Ymm4CompositionElement, Ymm4CompositionElementStability,
+    Ymm4CompositionViewport, Ymm4CompositionVisual, Ymm4SceneCompositionError,
+    Ymm4SceneCompositionSnapshot,
+};
 pub use scene_inspection::{
     ImportedSceneCapture, PNG_MEDIA_TYPE, PixelRect, Rgba8, SCENE_PIXEL_DETECTOR_VERSION,
     SceneFindingCode, SceneFindingSeverity, SceneFrameInspection, SceneInspectionFinding,
@@ -57,8 +64,12 @@ pub use ymm4::{
     Ymm4NativeVoiceMutationPlanRequest, Ymm4NativeVoiceMutationPlanResponse,
     Ymm4NativeVoicePlanRequest, Ymm4NativeVoicePlanResponse, Ymm4OperationReceipt,
     Ymm4OperationStatus, Ymm4PlanRequest, Ymm4PlanResponse, Ymm4ProjectControl,
-    Ymm4ProjectControlResult, Ymm4ProjectControls, Ymm4ProjectSnapshot, Ymm4TargetPlanApplyRequest,
-    Ymm4TargetPlanRequest, Ymm4TargetPlanValidation,
+    Ymm4ProjectControlResult, Ymm4ProjectControls, Ymm4ProjectInitializationPreparation,
+    Ymm4ProjectInitializationPrepareRequest, Ymm4ProjectInitializationReceipt,
+    Ymm4ProjectInitializationRequest, Ymm4ProjectInitializationStatus, Ymm4ProjectInstanceBinding,
+    Ymm4ProjectSnapshot, Ymm4TargetPlanApplyRequest, Ymm4TargetPlanRequest,
+    Ymm4TargetPlanValidation, Ymm4TimelineEditApplyRequest, Ymm4TimelineEditApplyResponse,
+    Ymm4TimelineEditReceipt, Ymm4TimelineEditValidation, Ymm4TimelineEditValidationRequest,
 };
 pub use ymm4_capabilities::{
     CapabilityRequirement, CapabilityValue, DriverDescriptor, FeatureDescriptor, MutationStatus,

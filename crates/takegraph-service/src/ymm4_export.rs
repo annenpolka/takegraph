@@ -165,6 +165,7 @@ impl Ymm4ExportPatch {
                 "operation ID must not be nil".into(),
             ));
         }
+        crate::require_existing_project_path(&target.project_path)?;
         let capabilities = client.structured_capabilities().await?;
         Self::stage_with_capabilities(client, head, target, utterances, capabilities, operation_id)
             .await
@@ -371,6 +372,8 @@ impl Ymm4ExportPatch {
         current_head: RevisionId,
     ) -> Result<crate::DurableExternalMutationOutcome, Ymm4ExportError> {
         self.validate_payload_digest()?;
+        crate::require_existing_project_path(&self.target.project_path)?;
+        crate::require_existing_project_path(&client.snapshot().await?.project_path)?;
         crate::external_mutation::authorize_external_patch(&self.patch)?;
         let request = Ymm4TargetPlanApplyRequest::new(
             self.target_plan.clone(),
@@ -913,6 +916,8 @@ pub enum Ymm4ExportError {
     DurableReceiptMismatch,
     #[error("YMM4 managed verification failed: {0}")]
     VerifyMismatch(String),
+    #[error(transparent)]
+    UnsavedProject(#[from] crate::UnsavedProjectError),
 }
 
 #[cfg(test)]

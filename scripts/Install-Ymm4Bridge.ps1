@@ -38,7 +38,9 @@ Assert-Ymm4Stopped
 
 $project = Join-Path $repositoryRoot 'bridges\ymm4\TakeGraph.Ymm4Bridge\TakeGraph.Ymm4Bridge.csproj'
 if (-not $SkipBuild) {
-    & dotnet build $project -c Release ("-p:Ymm4Path={0}" -f $resolvedYmm4Path)
+    # Keep human-facing build output out of the success pipeline so wrappers
+    # can consume the final JSON receipt without scraping localized log text.
+    & dotnet build $project -c Release -p:UseYmm4ContractStub=false ("-p:Ymm4Path={0}" -f $resolvedYmm4Path) | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Bridge build failed with exit code $LASTEXITCODE"
     }
@@ -48,11 +50,20 @@ if ([string]::IsNullOrWhiteSpace($BridgeDll)) {
     $BridgeDll = Join-Path $repositoryRoot 'bridges\ymm4\TakeGraph.Ymm4Bridge\bin\Release\net10.0-windows\TakeGraph.Ymm4Bridge.dll'
 }
 $source = (Resolve-Path -LiteralPath $BridgeDll).Path
+$sourceReferences = [Reflection.Assembly]::LoadFile($source).GetReferencedAssemblies().Name
+if ('YukkuriMovieMaker.Plugin' -notin $sourceReferences) {
+    throw 'Bridge DLL is not a production YMM4-contract build; contract-stub artifacts cannot be installed.'
+}
 $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-Ymm4Stopped
 
 $pluginDirectory = Join-Path $resolvedYmm4Path 'user\plugin\TakeGraph.Ymm4Bridge'
 $target = Join-Path $pluginDirectory 'TakeGraph.Ymm4Bridge.dll'
+if ([System.IO.Path]::GetFullPath($source).Equals(
+        [System.IO.Path]::GetFullPath($target),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'BridgeDll must be a build artifact, not the currently installed target.'
+}
 # YMM4 recursively probes DLLs below user\plugin. Backups must live outside
 # that tree and must not retain a .dll suffix, otherwise an old bridge can win
 # plugin discovery before the installed target.
@@ -99,22 +110,51 @@ try {
         throw 'The staged bridge copy does not match the built DLL hash.'
     }
 
-    if (Test-Path -LiteralPath $target -PathType Leaf) {
+    $targetExisted = Test-Path -LiteralPath $target -PathType Leaf
+    if ($targetExisted) {
         $oldHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         $backup = Join-Path $backupDirectory ("TakeGraph.Ymm4Bridge.{0}.{1}.dll.backup" -f $stamp, $oldHash.Substring(0, 12))
-        Copy-Item -LiteralPath $target -Destination $backup
-        $backupHash = (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($backupHash -ne $oldHash) {
-            throw 'The installed bridge backup could not be verified.'
-        }
     }
 
     Assert-Ymm4Stopped
-    [System.IO.File]::Move($incoming, $target, $true)
+    if ($targetExisted) {
+        [System.IO.File]::Replace($incoming, $target, $backup, $true)
+        $backupHash = (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($backupHash -ne $oldHash) {
+            throw 'The atomic bridge backup could not be verified.'
+        }
+    }
+    else {
+        [System.IO.File]::Move($incoming, $target)
+    }
     $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($installedHash -ne $sourceHash) {
-        throw 'The installed bridge does not match the built DLL hash.'
+        if ($targetExisted -and (Test-Path -LiteralPath $backup -PathType Leaf)) {
+            $restoreIncoming = Join-Path $pluginDirectory (".TakeGraph.Ymm4Bridge.{0}.restore" -f [guid]::NewGuid().ToString('N'))
+            try {
+                Copy-Item -LiteralPath $backup -Destination $restoreIncoming
+                $restoreHash = (Get-FileHash -LiteralPath $restoreIncoming -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($restoreHash -ne $oldHash) {
+                    throw 'The verified bridge backup could not be staged for restoration.'
+                }
+                [System.IO.File]::Replace($restoreIncoming, $target, $null, $true)
+                $restoredHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($restoredHash -ne $oldHash) {
+                    throw 'The previous bridge could not be restored after verification failure.'
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $restoreIncoming -PathType Leaf) {
+                    Remove-Item -LiteralPath $restoreIncoming -Force
+                }
+            }
+            throw 'The new bridge failed post-install verification; the previous bridge was restored.'
+        }
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Remove-Item -LiteralPath $target -Force
+        }
+        throw 'The new bridge failed post-install verification and was removed.'
     }
 
     [pscustomobject]@{

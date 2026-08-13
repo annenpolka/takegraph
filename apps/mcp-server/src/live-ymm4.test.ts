@@ -4,6 +4,12 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+const inheritedEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  ),
+);
+
 test(
   "live MCP tools describe the protocol-2 project and native descriptors",
   { skip: process.env.TAKEGRAPH_LIVE_YMM4 !== "1" },
@@ -11,6 +17,7 @@ test(
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [path.resolve(import.meta.dirname, "../dist/main.js"), "--stdio"],
+      env: { ...inheritedEnvironment, TAKEGRAPH_LEGACY_TOOLS: "1" },
       stderr: "pipe",
     });
     const client = new Client({ name: "takegraph-live-ymm4", version: "0.1.0" });
@@ -37,6 +44,7 @@ test(
       "native_voice_exact_wav_export",
       "scene_capture_native_png",
       "scene_capture_playhead_restore",
+      "scene_composition_current",
       "native_effect_typed_mutation",
       "project_checkpoint_verified",
     ];
@@ -92,6 +100,26 @@ test(
       process.env.TAKEGRAPH_LIVE_YMM4_PROJECT_PATTERN ?? "\\.ymmp$",
     );
     assert.match(structured.snapshot?.projectPath ?? "", expectedProject);
+
+    const scene = await client.callTool({
+      name: "takegraph_inspect",
+      arguments: { view: "scene" },
+    });
+    assert.equal(scene.isError, undefined);
+    const sceneContent = scene.structuredContent as {
+      composition?: {
+        schemaVersion?: number;
+        availability?: string;
+        observationStatus?: string;
+        evaluatedFrame?: number;
+        elements?: unknown[];
+      };
+    };
+    assert.equal(sceneContent.composition?.schemaVersion, 1);
+    assert.match(sceneContent.composition?.availability ?? "", /^current_frame_/);
+    assert.equal(sceneContent.composition?.observationStatus, "source_bound");
+    assert.ok(Number.isInteger(sceneContent.composition?.evaluatedFrame));
+    assert.ok(Array.isArray(sceneContent.composition?.elements));
 
     const descriptors = await client.callTool({
       name: "ymm4_native_extension_descriptors",

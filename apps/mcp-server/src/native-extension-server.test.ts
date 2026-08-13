@@ -3,11 +3,18 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ProjectSession } from "./project-session.js";
-import { createServer } from "./server.js";
+import {
+  createServer as createBaseServer,
+  type CreateServerOptions,
+} from "./server.js";
 import {
   type StageNativeExtensionInput,
   Ymm4Workflow,
 } from "./ymm4-workflow.js";
+
+function createServer(options: CreateServerOptions = {}) {
+  return createBaseServer({ ...options, legacyTools: true });
+}
 
 test("MCP exposes descriptor-bound native-extension approval and verification", async (t) => {
   const handle = "77777777-7777-4777-8777-777777777777";

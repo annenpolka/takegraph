@@ -87,6 +87,102 @@ internal sealed record ProjectSnapshotDto(
     IReadOnlyList<ManagedNativeExtensionDto> NativeExtensions,
     int UnmanagedContextCount);
 
+internal sealed record ProjectInitializationPrepareRequestDto(
+    int ProtocolVersion,
+    string DestinationPath);
+
+internal sealed record ProjectInitializationPreparationDto(
+    int ProtocolVersion,
+    string DriverProfileDigest,
+    string SourceProjectInstanceId,
+    ProjectSnapshotDto Source,
+    string DestinationPath,
+    string DestinationPathDigest,
+    string PredictedProjectId,
+    string PredictedFingerprint,
+    bool Overwrite);
+
+internal sealed record ProjectInstanceBindingDto(
+    int ProtocolVersion,
+    string DriverProfileDigest,
+    string SourceProjectInstanceId,
+    ProjectSnapshotDto Source);
+
+internal sealed record ProjectInitializationRequestDto(
+    int ProtocolVersion,
+    Guid OperationId,
+    string RequestDigest,
+    string DriverProfileDigest,
+    string SourceProjectInstanceId,
+    string SourceProjectId,
+    string SourceSceneId,
+    string ExpectedSourceFingerprint,
+    string DestinationPath,
+    string DestinationPathDigest,
+    string PredictedProjectId,
+    string PredictedFingerprint,
+    bool Overwrite);
+
+internal sealed record ProjectInitializationReceiptDto(
+    Guid OperationId,
+    string RequestDigest,
+    string Status,
+    string DriverProfileDigest,
+    string SourceProjectInstanceId,
+    string SourceProjectId,
+    string SourceSceneId,
+    string BeforeFingerprint,
+    string DestinationPath,
+    string DestinationPathDigest,
+    string PredictedProjectId,
+    string PredictedFingerprint,
+    string? PreparedTemporaryPath,
+    string? PreparedFileSha256,
+    ulong? PreparedFileBytes,
+    ProjectSnapshotDto? AfterSnapshot,
+    string? FileSha256,
+    ulong? FileBytes,
+    string? Error);
+
+/// A read-only observation of the active timeline at the preview's current frame.
+/// Geometry is deliberately explicit about availability: the bridge must not
+/// infer transforms or bounds that YMM4 does not expose as stable scalar values.
+internal sealed record SceneCompositionViewportDto(
+    string Availability,
+    int? Width,
+    int? Height);
+
+internal sealed record SceneCompositionVisualDto(
+    string Availability,
+    int? X,
+    int? Y,
+    int? Width,
+    int? Height);
+
+internal sealed record SceneCompositionElementDto(
+    string ElementId,
+    string Stability,
+    string Kind,
+    int Frame,
+    int Layer,
+    int Length,
+    bool Active,
+    bool? Selected,
+    string? Text,
+    SceneCompositionVisualDto Visual);
+
+internal sealed record SceneCompositionSnapshotDto(
+    uint SchemaVersion,
+    string ProjectId,
+    string SceneId,
+    string SourceFingerprint,
+    uint Fps,
+    int Frame,
+    SceneCompositionViewportDto Viewport,
+    IReadOnlyList<SceneCompositionElementDto> Elements,
+    string Completeness,
+    IReadOnlyList<string> UnavailableFields);
+
 internal sealed record ManagedUtteranceDto(
     string EntityId,
     ulong Revision,
@@ -644,6 +740,56 @@ internal sealed record TargetPlanValidationDto(
     int UpdateCount,
     int DeleteCount,
     int PhysicalItemCount);
+
+/// One approval-bound, ordered transaction over heterogeneous managed cue
+/// strategies. Native-extension payloads are represented on the wire for
+/// forward compatibility, but the current bridge capability deliberately
+/// rejects them until their richer preservation receipt can share this WAL.
+internal sealed record TimelineEditApplyRequestDto(
+    int ProtocolVersion,
+    string RequestDigest,
+    string ExpectedFingerprint,
+    string PlanDigest,
+    JsonElement TimelineEditPlan,
+    IReadOnlyList<NativeExtensionArtifactDto> Artifacts);
+
+internal sealed record TimelineEditValidationRequestDto(
+    int ProtocolVersion,
+    string ExpectedFingerprint,
+    string PlanDigest,
+    JsonElement TimelineEditPlan,
+    IReadOnlyList<NativeExtensionArtifactDto> Artifacts);
+
+internal sealed record TimelineEditValidationDto(
+    Guid OperationId,
+    string PlanDigest,
+    string Fingerprint,
+    IReadOnlyDictionary<string, int> StrategyCounts,
+    int CreateCount,
+    int UpdateCount,
+    int DeleteCount,
+    int PhysicalItemCount);
+
+internal sealed record TimelineEditReceiptDto(
+    Guid OperationId,
+    string RequestDigest,
+    string ProjectId,
+    string SceneId,
+    string ExpectedFingerprint,
+    string PlanDigest,
+    string Status,
+    string BeforeFingerprint,
+    string AfterFingerprint,
+    IReadOnlyList<ManagedItemDto> AppliedItems,
+    IReadOnlyList<NativeExtensionRealizationDto> AppliedNativeExtensions,
+    int AppliedOperationCount,
+    bool Verified,
+    string? Error);
+
+internal sealed record TimelineEditApplyResponseDto(
+    bool Success,
+    bool Replayed,
+    TimelineEditReceiptDto Receipt);
 
 internal sealed record ErrorDto(
     string Error,

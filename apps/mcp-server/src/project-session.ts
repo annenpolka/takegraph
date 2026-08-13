@@ -173,7 +173,10 @@ export class ProjectSession {
       (candidate) => candidate.id === input.utteranceId,
     );
     if (!utterance) {
-      throw new Error(`Unknown utterance: ${input.utteranceId}`);
+      const known = this.state.utterances.map((candidate) => candidate.id).join(", ");
+      throw new Error(
+        `Unknown utterance: ${input.utteranceId}. known: ${known || "(none)"}`,
+      );
     }
 
     this.takeSequence += 1;
@@ -194,8 +197,12 @@ export class ProjectSession {
   stageTake(takeId: string): ProjectState {
     const take = this.requireTake(takeId);
     if (take.readiness !== "ready") {
+      const ready = this.state.takes
+        .filter((candidate) => candidate.readiness === "ready")
+        .map((candidate) => candidate.id)
+        .join(", ");
       throw new Error(
-        "This take has no completed audio artifact yet; only its synthesis query is ready.",
+        `Take ${takeId} has no completed audio artifact yet; only its synthesis query is ready. readyTakes: ${ready || "(none)"}`,
       );
     }
 
@@ -218,17 +225,30 @@ export class ProjectSession {
     digest: string;
   }): Promise<ProjectState> {
     const patch = this.state.stagedPatch;
-    if (!patch || patch.id !== input.patchId) {
-      throw new Error("The staged patch no longer exists.");
+    if (!patch) {
+      throw new Error("No staged studio patch.");
+    }
+    if (patch.id !== input.patchId) {
+      throw new Error(
+        `Staged studio patch is ${patch.id}, not ${input.patchId}. digest: ${patch.digest}`,
+      );
     }
 
     this.requireTake(patch.takeId);
-    const nextRevision = await commitThroughCore({
-      baseRevision: patch.baseRevision,
-      headRevision: this.state.revision,
-      digest: patch.digest,
-      approvedDigest: input.digest,
-    });
+    let nextRevision: number;
+    try {
+      nextRevision = await commitThroughCore({
+        baseRevision: patch.baseRevision,
+        headRevision: this.state.revision,
+        digest: patch.digest,
+        approvedDigest: input.digest,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `${message} stagedPatchId=${patch.id} digest=${patch.digest}`,
+      );
+    }
     this.state.takes = this.state.takes.map((take) => ({
       ...take,
       status: take.id === patch.takeId ? "active" : "candidate",

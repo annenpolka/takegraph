@@ -140,6 +140,7 @@ impl Ymm4NativeVoiceExportPatch {
         cues: Vec<Ymm4NativeVoiceCue>,
         capabilities: takegraph_node::StructuredYmm4Capabilities,
     ) -> Result<Self, Ymm4NativeVoiceExportError> {
+        crate::require_existing_project_path(&target.project_path)?;
         let operation_id = Uuid::new_v4();
         let target_plan =
             crate::native_voice_target_plan(head, operation_id, &target, &cues, &capabilities)?;
@@ -293,6 +294,8 @@ impl Ymm4NativeVoiceExportPatch {
         current_head: RevisionId,
     ) -> Result<crate::DurableExternalMutationOutcome, Ymm4NativeVoiceExportError> {
         self.validate_payload_digest()?;
+        crate::require_existing_project_path(&self.target.project_path)?;
+        crate::require_existing_project_path(&client.snapshot().await?.project_path)?;
         crate::external_mutation::authorize_external_patch(&self.patch)?;
         let request = Ymm4TargetPlanApplyRequest::new(
             self.target_plan.clone(),
@@ -767,6 +770,8 @@ pub enum Ymm4NativeVoiceExportError {
         "stored YMM4 native-voice digest does not match its canonical payload (stored {stored}, canonical {canonical})"
     )]
     PayloadDigestMismatch { stored: String, canonical: String },
+    #[error(transparent)]
+    UnsavedProject(#[from] crate::UnsavedProjectError),
     #[error("YMM4 native-voice apply failed: {0}")]
     ApplyFailed(String),
     #[error("YMM4 native-voice apply has no verified read-back receipt")]

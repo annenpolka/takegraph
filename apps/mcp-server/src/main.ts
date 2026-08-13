@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
+import { TaskFacadeRegistry } from "./facade.js";
 import { ProjectSession } from "./project-session.js";
 import { createServer } from "./server.js";
 
@@ -48,7 +49,9 @@ async function startHttpServer(factory: () => McpServer): Promise<void> {
 }
 
 const session = new ProjectSession();
-const serverFactory = () => createServer({ session });
+const facadeRegistry = new TaskFacadeRegistry();
+const legacyTools = process.env.TAKEGRAPH_LEGACY_TOOLS === "1";
+const serverFactory = () => createServer({ session, facadeRegistry, legacyTools });
 
 if (process.argv.includes("--stdio")) {
   await startStdioServer(serverFactory);

@@ -44,7 +44,80 @@ pnpm build
 pnpm --filter @takegraph/mcp-server start
 ```
 
-The server exposes Editor-view tools plus headless YMM4 workflows.
+The server exposes Editor-view tools plus headless YMM4 workflows. Its default
+model-facing surface is deliberately limited to five task-oriented tools:
+`takegraph_inspect`, `takegraph_task_stage`, `takegraph_task_approve`,
+`takegraph_task_execute`, and `takegraph_task_decide`. Studio gesture tools stay
+app-only. Every staged operation returns a common task envelope so callers can
+follow `taskId`, digests, phase, and `availableActions` instead of selecting
+among route-specific tool families.
+
+Project initialization uses that same five-tool surface. Stage
+`kind: "project_initialization"` with `mode: "adopt_active"` for an already
+saved active YMM4 project, or use `mode: "save_untitled"` with a user-selected
+`path`. The path is accepted only while staging and is not repeated in the task
+envelope; subsequent approval and execution use the opaque `taskId` and exact
+`planDigest`.
+
+Canonical voice creation can be grouped without adding more tool families.
+Prefer `kind: "timeline_edit"` with 1–128 ordered `operations` when portable
+and native voice creates belong to one logical edit. It produces one sealed
+plan, one task, one exact `planDigest`, and one canonical commit. Independent
+VOICEVOX artifacts are prepared with bounded parallelism, then restored to
+input order before the plan is sealed; YMM4 apply remains serialized and
+deterministic. Native voice update/delete and native extensions are not in this
+aggregate yet and stay on their separately guarded `native_voice_mutation` and
+`native_extension` workflows.
+
+Legacy `kind: "portable_voice"` and `kind: "native_voice"` still accept an
+`items` array of 1–128 entries, and their previous flat single-item fields
+remain accepted for compatibility.
+
+```json
+{
+  "kind": "timeline_edit",
+  "operations": [
+    {
+      "op": "portable_voice_create",
+      "entityId": "line-001",
+      "caption": "表示する字幕",
+      "spokenText": "読み上げる文章",
+      "speaker": "春日部つむぎ",
+      "style": "ノーマル",
+      "frame": 0
+    },
+    {
+      "op": "native_voice_create",
+      "entityId": "line-002",
+      "displayText": "次の台詞",
+      "spokenText": "次の台詞",
+      "characterName": "春日部つむぎ",
+      "frame": 180,
+      "layer": 2,
+      "maxLength": 300
+    }
+  ]
+}
+```
+
+Staging returns one opaque `taskId` and exact `planDigest`; execute that same
+task with the exact digest. After a process restart or an uncertain execution
+outcome, revalidate the same task ID. Revalidation payload-checks the durable
+task file without contacting YMM4 and reports whether exact retry is available;
+it does not mistake a merely staged edit for an applied one.
+
+Composition is part of that same read surface, not another tool family. Call
+`takegraph_inspect` with `view: "scene"` (or request `include: ["composition"]`)
+to observe the active YMM4 scene at its current preview frame. The observation
+is read-only, source-bound to project/scene/fingerprint/fps, and reports
+unavailable viewport or element geometry explicitly instead of guessing it.
+Older bridges safely fall back to timeline-only placement. PNG scene capture
+remains the separate review path for visual qualities the structured observer
+cannot expose. Display text is exposed only for TakeGraph-owned voice/caption
+realizations; arbitrary unmanaged plugin item text and file paths remain opaque.
+
+Set `TAKEGRAPH_LEGACY_TOOLS=1` before starting the MCP server to additionally
+register the route-specific compatibility tools described below. For example,
 `ymm4_native_voice_stage` previews an explicit `native_voice` realization;
 `ymm4_export_stage` selects `portable_pair` and materializes a VOICEVOX take.
 Its caption and synthesis `spokenText` remain distinct and are both sealed;
@@ -58,7 +131,9 @@ separate operation and only saves to an existing project path.
 
 MCP obtains the active project's canonical revision from
 `takegraph ymm4 canonical-head --state-root ...`; it does not own a second
-revision mirror. It forwards that command's project ID as
+revision mirror. An uninitialized store is reported explicitly with
+`initialized: false` and `revision: null`; ordinary workflows cannot create
+generation zero as a side effect. It forwards that command's project ID as
 `--expected-project-id` to every snapshot-dependent follow-up, so switching the
 active YMM4 project between head lookup and execution fails closed. CLI and MCP
 share `TAKEGRAPH_PROJECT_STATE_ROOT` and
@@ -99,6 +174,17 @@ Install the resulting DLL under
 `<YMM4>\user\plugin\TakeGraph.Ymm4Bridge\` and restart YMM4. The plugin writes
 a random local token to `%LOCALAPPDATA%\TakeGraph\ymm4-bridge.json`; the CLI
 and MCP workflow read that file by default. Do not commit or share it.
+
+For day-to-day local updates, the wrapper performs a normal application close,
+builds and hash-verifies the production bridge, installs it with a recoverable
+backup, restarts YMM4, and waits for authenticated bridge health. When no
+`-Ymm4Arguments` are supplied, it also reopens the named project that was
+active before shutdown and verifies the restored path. It never force-stops
+YMM4, so an unresolved save confirmation fails safely:
+
+```powershell
+.\scripts\Update-Ymm4Bridge.ps1 -Ymm4Path "C:\path\to\YMM4"
+```
 
 With VOICEVOX ENGINE and YMM4 running:
 

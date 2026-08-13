@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use takegraph_core::{
     AssetKind, CanonicalError, EffectOperation, ManagedSemanticIdentity, ManagedSemanticItem,
     ManagedSemanticValue, NativeExtensionIntent, Patch, PatchError, PatchId, PatchStatus,
-    PortraitPresentation, ReconciliationAction, ReconciliationDecision, ReconciliationError,
-    ReconciliationPreview, ReconciliationSource, RevisionId, SemanticDriftReport, canonical_sha256,
+    PortraitPresentation, ProjectInitializationMode, ProjectInitializationPlan,
+    ProjectInitializationPlanError, ProjectInitializationSource, ReconciliationAction,
+    ReconciliationDecision, ReconciliationError, ReconciliationPreview, ReconciliationSource,
+    RevisionId, SemanticDriftReport, canonical_sha256,
 };
 use takegraph_node::{
     CapabilityRequirement, ManagedUtterance, MetadataDetachNodeError, ProjectOperationNodeError,
@@ -26,10 +28,10 @@ use takegraph_node::{
     Ymm4CheckpointReceipt, Ymm4CheckpointRequest, Ymm4CheckpointRequestInput, Ymm4CheckpointStatus,
     Ymm4Error, Ymm4MetadataDetachReceipt, Ymm4MetadataDetachRequest,
     Ymm4MetadataDetachRequestInput, Ymm4MetadataDetachStatus, Ymm4NativeVoiceMutation,
-    Ymm4ProjectSnapshot, Ymm4RenderProfileDescriptor, Ymm4RenderRequest, Ymm4RenderRequestInput,
-    Ymm4RenderStatus, Ymm4RenderTask, validate_render_task, verify_checkpoint,
-    verify_metadata_detach, verify_metadata_detach_not_started, verify_render_checkpoint_file,
-    verify_rendered_media,
+    Ymm4ProjectInitializationRequest, Ymm4ProjectInitializationStatus, Ymm4ProjectSnapshot,
+    Ymm4RenderProfileDescriptor, Ymm4RenderRequest, Ymm4RenderRequestInput, Ymm4RenderStatus,
+    Ymm4RenderTask, validate_render_task, verify_checkpoint, verify_metadata_detach,
+    verify_metadata_detach_not_started, verify_render_checkpoint_file, verify_rendered_media,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -42,6 +44,42 @@ use crate::{
 
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const RECONCILIATION_STATE_PROFILE: &str = "takegraph-ymm4-managed-semantic-projection/v2";
+
+/// Persisted service lifecycle for one project initialization proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectInitializationTaskStatus {
+    Staged,
+    Approved,
+    Executing,
+    Initialized,
+    AlreadyInitialized,
+    Conflicted,
+    Stale,
+    Failed,
+    RecoveryRequired,
+}
+
+/// Local adapter inputs are deliberately separate from the portable plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectInitializationTaskRecord {
+    pub plan: ProjectInitializationPlan,
+    /// Host-local absolute path; never surface this record directly to a model.
+    pub destination_path: Option<PathBuf>,
+    pub bridge_request: Option<Ymm4ProjectInitializationRequest>,
+    pub approved_plan_digest: Option<String>,
+    pub status: ProjectInitializationTaskStatus,
+    pub result_project_id: Option<String>,
+    pub result_scene_id: Option<String>,
+    pub canonical_revision: Option<RevisionId>,
+    pub canonical_created: Option<bool>,
+    /// True only in the response to an execute call that replayed an already
+    /// completed canonical initialization. It is not an approval input.
+    #[serde(default)]
+    pub execution_replayed: bool,
+    pub error: Option<String>,
+}
 
 /// Persisted service checkpoint state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1039,6 +1077,444 @@ impl ProjectOperationStore {
         }
     }
 
+    /// Stages initialization of the active project without mutating YMM4 or
+    /// publishing canonical generation zero.
+    ///
+    /// `destination_path` is required only for `SaveUntitled` and remains in
+    /// the host-local journal; the portable plan contains only its digest and
+    /// file name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active binding, mode-specific path, bridge
+    /// preparation, canonical state, or durable task journal is invalid.
+    pub async fn stage_project_initialization(
+        &self,
+        shared_project_root: impl AsRef<Path>,
+        client: &Ymm4BridgeClient,
+        mode: ProjectInitializationMode,
+        destination_path: Option<PathBuf>,
+    ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
+        let operation_id = Uuid::new_v4();
+        let binding = client.project_instance_binding().await?;
+        let source_path_digest = if binding.source.project_path.trim().is_empty() {
+            None
+        } else {
+            Some(canonical_sha256(
+                "takegraph-project-initialization-source-path-v1",
+                &binding.source.project_path,
+            )?)
+        };
+        let source = ProjectInitializationSource {
+            project_id: binding.source.project_id.clone(),
+            scene_id: binding.source.scene_id.clone(),
+            fingerprint: normalize_sha256(&binding.source.fingerprint),
+            project_instance_id: binding.source_project_instance_id.clone(),
+            project_path_digest: source_path_digest,
+        };
+        let (destination, bridge_request, target_project_id) = match mode {
+            ProjectInitializationMode::AdoptActive => {
+                if destination_path.is_some() || binding.source.project_path.trim().is_empty() {
+                    return Err(ProjectOperationError::InvalidProjectInitializationInput);
+                }
+                (None, None, binding.source.project_id.clone())
+            }
+            ProjectInitializationMode::SaveUntitled => {
+                let destination_path = destination_path
+                    .as_ref()
+                    .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+                if !binding.source.project_path.trim().is_empty() {
+                    return Err(ProjectOperationError::InvalidProjectInitializationInput);
+                }
+                let preparation = client
+                    .prepare_project_initialization(destination_path.to_string_lossy())
+                    .await?;
+                if preparation.source_project_instance_id != binding.source_project_instance_id
+                    || preparation.source != binding.source
+                    || preparation.driver_profile_digest != binding.driver_profile_digest
+                {
+                    return Err(ProjectOperationError::StaleTargetState);
+                }
+                let request = Ymm4ProjectInitializationRequest::new(operation_id, &preparation)?;
+                let file_name = destination_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?
+                    .to_owned();
+                (
+                    Some(takegraph_core::ProjectInitializationDestination {
+                        project_id: preparation.predicted_project_id.clone(),
+                        path_digest: normalize_sha256(&preparation.destination_path_digest),
+                        file_name,
+                    }),
+                    Some(request),
+                    preparation.predicted_project_id,
+                )
+            }
+        };
+        let existing =
+            DurableProjectStore::observe_scoped(shared_project_root, &target_project_id)?;
+        if mode == ProjectInitializationMode::SaveUntitled && existing.is_some() {
+            return Err(ProjectOperationError::CanonicalAlreadyInitialized(
+                target_project_id,
+            ));
+        }
+        let revision = existing.as_ref().map_or(RevisionId(0), |state| state.head);
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            mode,
+            source,
+            destination,
+            revision,
+            existing.is_some(),
+            normalize_sha256(&binding.driver_profile_digest),
+        )?;
+        let payload = ProjectInitializationTaskRecord {
+            plan,
+            destination_path,
+            bridge_request,
+            approved_plan_digest: None,
+            status: ProjectInitializationTaskStatus::Staged,
+            result_project_id: None,
+            result_scene_id: None,
+            canonical_revision: None,
+            canonical_created: None,
+            execution_replayed: false,
+            error: None,
+        };
+        self.append_project_initialization(&payload, None)
+    }
+
+    /// Records exact-digest approval for a staged project initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing/corrupt task, digest mismatch, or an
+    /// invalid lifecycle transition.
+    pub fn approve_project_initialization(
+        &self,
+        operation_id: Uuid,
+        approved_plan_digest: &str,
+    ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
+        let mut durable = self.project_initialization_status(operation_id)?;
+        durable.payload.plan.verify()?;
+        if approved_plan_digest != durable.payload.plan.plan_digest {
+            return Err(ProjectOperationError::ProjectInitializationApprovalMismatch);
+        }
+        if durable.payload.status == ProjectInitializationTaskStatus::Approved
+            && durable.payload.approved_plan_digest.as_deref() == Some(approved_plan_digest)
+        {
+            return Ok(durable);
+        }
+        if durable.payload.status != ProjectInitializationTaskStatus::Staged {
+            return Err(
+                ProjectOperationError::InvalidProjectInitializationTransition(
+                    durable.payload.status,
+                ),
+            );
+        }
+        durable.payload.approved_plan_digest = Some(approved_plan_digest.into());
+        durable.payload.status = ProjectInitializationTaskStatus::Approved;
+        durable.payload.error = None;
+        self.append_project_initialization(&durable.payload, Some(durable.generation))
+    }
+
+    /// Reads the latest validated project-initialization generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is missing or its journal is corrupt.
+    pub fn project_initialization_status(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
+        self.load_latest(TaskKind::ProjectInitialization, &operation_id.to_string())?
+            .ok_or(ProjectOperationError::TaskNotFound(operation_id))
+    }
+
+    /// Executes or resumes an exact approved project initialization.
+    /// Save As publication and canonical generation zero are separately
+    /// durable, so retry can finish after a crash between them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale source/approval, bridge failure, a competing
+    /// initializer, or corrupt durable evidence.
+    #[allow(clippy::too_many_lines)] // Keeps reservation, bridge receipt, and canonical publication in one auditable transition.
+    pub async fn execute_project_initialization(
+        &self,
+        shared_project_root: impl AsRef<Path>,
+        client: &Ymm4BridgeClient,
+        operation_id: Uuid,
+    ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
+        let mut durable = self.project_initialization_status(operation_id)?;
+        durable.payload.plan.verify()?;
+        if matches!(
+            durable.payload.status,
+            ProjectInitializationTaskStatus::Initialized
+                | ProjectInitializationTaskStatus::AlreadyInitialized
+        ) {
+            if durable.payload.approved_plan_digest.as_deref()
+                != Some(durable.payload.plan.plan_digest.as_str())
+            {
+                return Err(ProjectOperationError::ProjectInitializationApprovalMismatch);
+            }
+            durable.payload.execution_replayed = true;
+            return Ok(durable);
+        }
+        if durable.payload.status != ProjectInitializationTaskStatus::Approved
+            && durable.payload.status != ProjectInitializationTaskStatus::Executing
+            && durable.payload.status != ProjectInitializationTaskStatus::RecoveryRequired
+        {
+            return Err(
+                ProjectOperationError::InvalidProjectInitializationTransition(
+                    durable.payload.status,
+                ),
+            );
+        }
+        if durable.payload.approved_plan_digest.as_deref()
+            != Some(durable.payload.plan.plan_digest.as_str())
+        {
+            return Err(ProjectOperationError::ProjectInitializationApprovalMismatch);
+        }
+        validate_project_initialization_execution_binding(&durable.payload)?;
+
+        let target_project_id = durable.payload.plan.target_project_id().to_owned();
+        let (canonical, reservation) = DurableProjectStore::reserve_scoped_initialization(
+            &shared_project_root,
+            &target_project_id,
+            operation_id,
+            &durable.payload.plan.plan_digest,
+            durable.payload.plan.canonical_revision,
+        )?;
+        if matches!(
+            reservation,
+            crate::ProjectInitializationReservationOutcome::CompletedReplayed
+                | crate::ProjectInitializationReservationOutcome::BootstrapPublishedPartial
+        ) {
+            if reservation
+                == crate::ProjectInitializationReservationOutcome::BootstrapPublishedPartial
+            {
+                canonical.complete_reserved_initialization(
+                    operation_id,
+                    &durable.payload.plan.plan_digest,
+                )?;
+            }
+            durable.payload.status = ProjectInitializationTaskStatus::Initialized;
+            durable.payload.result_project_id = Some(target_project_id);
+            durable.payload.result_scene_id = Some(durable.payload.plan.source.scene_id.clone());
+            durable.payload.canonical_revision = Some(durable.payload.plan.canonical_revision);
+            durable.payload.canonical_created = Some(true);
+            durable.payload.execution_replayed = true;
+            durable.payload.error = None;
+            return self.append_project_initialization(&durable.payload, Some(durable.generation));
+        }
+        if reservation == crate::ProjectInitializationReservationOutcome::AlreadyInitialized {
+            if !durable.payload.plan.canonical_preexisting {
+                durable.payload.status = ProjectInitializationTaskStatus::Conflicted;
+                durable.payload.error =
+                    Some("canonical project was initialized by another approved operation".into());
+                let _ =
+                    self.append_project_initialization(&durable.payload, Some(durable.generation));
+                return Err(ProjectOperationError::CanonicalAlreadyInitialized(
+                    target_project_id,
+                ));
+            }
+            let binding = client.project_instance_binding().await?;
+            if binding.source_project_instance_id != durable.payload.plan.source.project_instance_id
+                || binding.source.project_id != durable.payload.plan.source.project_id
+                || binding.source.scene_id != durable.payload.plan.source.scene_id
+                || normalize_sha256(&binding.source.fingerprint)
+                    != durable.payload.plan.source.fingerprint
+                || binding.source.project_path.trim().is_empty()
+                || canonical_sha256(
+                    "takegraph-project-initialization-source-path-v1",
+                    &binding.source.project_path,
+                )? != durable
+                    .payload
+                    .plan
+                    .source
+                    .project_path_digest
+                    .clone()
+                    .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?
+                || normalize_sha256(&binding.driver_profile_digest)
+                    != durable.payload.plan.capability_digest
+            {
+                return Err(ProjectOperationError::StaleTargetState);
+            }
+            let existing =
+                DurableProjectStore::observe_scoped(&shared_project_root, &target_project_id)?
+                    .ok_or_else(|| {
+                        ProjectOperationError::CanonicalAlreadyInitialized(
+                            target_project_id.clone(),
+                        )
+                    })?;
+            if existing.head != durable.payload.plan.canonical_revision {
+                return Err(ProjectOperationError::StaleRevision {
+                    expected: durable.payload.plan.canonical_revision,
+                    actual: existing.head,
+                });
+            }
+            durable.payload.status = ProjectInitializationTaskStatus::AlreadyInitialized;
+            durable.payload.result_project_id = Some(target_project_id.clone());
+            durable.payload.result_scene_id = Some(durable.payload.plan.source.scene_id.clone());
+            durable.payload.canonical_revision = Some(durable.payload.plan.canonical_revision);
+            durable.payload.canonical_created = Some(false);
+            durable.payload.execution_replayed = false;
+            durable.payload.error = None;
+            return self.append_project_initialization(&durable.payload, Some(durable.generation));
+        }
+
+        if matches!(
+            durable.payload.status,
+            ProjectInitializationTaskStatus::Approved
+                | ProjectInitializationTaskStatus::RecoveryRequired
+        ) {
+            durable.payload.status = ProjectInitializationTaskStatus::Executing;
+            durable.payload.error = None;
+            durable =
+                self.append_project_initialization(&durable.payload, Some(durable.generation))?;
+        }
+
+        let (result_project_id, result_scene_id) = match durable.payload.plan.mode {
+            ProjectInitializationMode::AdoptActive => {
+                let binding = match client.project_instance_binding().await {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        // Adoption never writes YMM4. A failed observation
+                        // therefore cannot hide a partial target mutation and
+                        // its canonical reservation is safe to release.
+                        canonical.cancel_reserved_initialization(
+                            operation_id,
+                            &durable.payload.plan.plan_digest,
+                        )?;
+                        durable.payload.status = ProjectInitializationTaskStatus::Stale;
+                        durable.payload.error =
+                            Some("active project binding could not be revalidated".into());
+                        let _ = self.append_project_initialization(
+                            &durable.payload,
+                            Some(durable.generation),
+                        );
+                        return Err(error.into());
+                    }
+                };
+                if binding.source_project_instance_id
+                    != durable.payload.plan.source.project_instance_id
+                    || binding.source.project_id != durable.payload.plan.source.project_id
+                    || binding.source.scene_id != durable.payload.plan.source.scene_id
+                    || normalize_sha256(&binding.source.fingerprint)
+                        != durable.payload.plan.source.fingerprint
+                    || binding.source.project_path.trim().is_empty()
+                    || canonical_sha256(
+                        "takegraph-project-initialization-source-path-v1",
+                        &binding.source.project_path,
+                    )? != durable
+                        .payload
+                        .plan
+                        .source
+                        .project_path_digest
+                        .clone()
+                        .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?
+                    || normalize_sha256(&binding.driver_profile_digest)
+                        != durable.payload.plan.capability_digest
+                {
+                    canonical.cancel_reserved_initialization(
+                        operation_id,
+                        &durable.payload.plan.plan_digest,
+                    )?;
+                    durable.payload.status = ProjectInitializationTaskStatus::Stale;
+                    durable.payload.error = Some("active project binding changed".into());
+                    let _ = self
+                        .append_project_initialization(&durable.payload, Some(durable.generation));
+                    return Err(ProjectOperationError::StaleTargetState);
+                }
+                (binding.source.project_id, binding.source.scene_id)
+            }
+            ProjectInitializationMode::SaveUntitled => {
+                let request = durable
+                    .payload
+                    .bridge_request
+                    .as_ref()
+                    .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+                let receipt = match client.initialize_project(request).await {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        // Transport/HTTP failure cannot prove whether the
+                        // bridge published the file. Keep the exact operation
+                        // resumable and retain its project-scoped reservation;
+                        // authenticated bridge replay decides the outcome.
+                        durable.payload.status = ProjectInitializationTaskStatus::Executing;
+                        durable.payload.error = Some(error.to_string());
+                        let _ = self.append_project_initialization(
+                            &durable.payload,
+                            Some(durable.generation),
+                        );
+                        return Err(error.into());
+                    }
+                };
+                if receipt.status == Ymm4ProjectInitializationStatus::Failed {
+                    // The node accepts Failed only as the bridge's strict,
+                    // request-bound proof that the destination was never
+                    // written: no prepared/final file evidence and the exact
+                    // untouched untitled source snapshot. Unlike transport or
+                    // recovery-required outcomes, this makes cancellation of
+                    // the canonical reservation safe and retryable.
+                    canonical.cancel_reserved_initialization(
+                        operation_id,
+                        &durable.payload.plan.plan_digest,
+                    )?;
+                    durable.payload.status = ProjectInitializationTaskStatus::Failed;
+                    durable.payload.error = receipt.error;
+                    self.append_project_initialization(&durable.payload, Some(durable.generation))?;
+                    return Err(ProjectOperationError::ProjectInitializationNotVerified);
+                }
+                if !matches!(
+                    receipt.status,
+                    Ymm4ProjectInitializationStatus::Verified
+                        | Ymm4ProjectInitializationStatus::Replayed
+                ) {
+                    durable.payload.status = match receipt.status {
+                        Ymm4ProjectInitializationStatus::RecoveryRequired => {
+                            ProjectInitializationTaskStatus::RecoveryRequired
+                        }
+                        Ymm4ProjectInitializationStatus::Applying => {
+                            ProjectInitializationTaskStatus::Executing
+                        }
+                        _ => ProjectInitializationTaskStatus::Failed,
+                    };
+                    durable.payload.error = receipt.error;
+                    let _ = self
+                        .append_project_initialization(&durable.payload, Some(durable.generation));
+                    return Err(ProjectOperationError::ProjectInitializationNotVerified);
+                }
+                let after = receipt
+                    .after_snapshot
+                    .ok_or(ProjectOperationError::ProjectInitializationNotVerified)?;
+                (after.project_id, after.scene_id)
+            }
+        };
+        if result_project_id != target_project_id
+            || result_scene_id != durable.payload.plan.source.scene_id
+        {
+            durable.payload.status = ProjectInitializationTaskStatus::Stale;
+            durable.payload.error = Some("initialized target identity does not match plan".into());
+            let _ = self.append_project_initialization(&durable.payload, Some(durable.generation));
+            return Err(ProjectOperationError::StaleTargetState);
+        }
+
+        let completion = canonical
+            .complete_reserved_initialization(operation_id, &durable.payload.plan.plan_digest)?;
+        durable.payload.status = ProjectInitializationTaskStatus::Initialized;
+        durable.payload.result_project_id = Some(result_project_id);
+        durable.payload.result_scene_id = Some(result_scene_id);
+        durable.payload.canonical_revision = Some(durable.payload.plan.canonical_revision);
+        durable.payload.canonical_created = Some(true);
+        durable.payload.execution_replayed =
+            completion == crate::ProjectInitializationReservationOutcome::CompletedReplayed;
+        durable.payload.error = None;
+        self.append_project_initialization(&durable.payload, Some(durable.generation))
+    }
+
     /// Stages a save bound to current target identity/state and canonical head.
     ///
     /// # Errors
@@ -1647,6 +2123,10 @@ impl ProjectOperationStore {
         client: &Ymm4BridgeClient,
         child_task_id: &str,
     ) -> Result<DurableTaskRecord<ReconciliationChildTask>, ProjectOperationError> {
+        let live = client.snapshot().await?;
+        if live.project_path.trim().is_empty() {
+            return Err(ProjectOperationError::UnsavedProject);
+        }
         let mut durable = self.validated_reconciliation_child(child_task_id)?;
         if reissuable_detach_terminal(&durable.payload) {
             let terminal_error = metadata_detach_terminal_error(&durable.payload);
@@ -2653,6 +3133,19 @@ impl ProjectOperationStore {
         )
     }
 
+    fn append_project_initialization(
+        &self,
+        payload: &ProjectInitializationTaskRecord,
+        generation: Option<u64>,
+    ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
+        self.append(
+            TaskKind::ProjectInitialization,
+            &payload.plan.operation_id.to_string(),
+            payload,
+            generation,
+        )
+    }
+
     fn append_render(
         &self,
         payload: &RenderTaskRecord,
@@ -2849,6 +3342,7 @@ fn open_lock(directory: &Path) -> Result<File, std::io::Error> {
 
 #[derive(Debug, Clone, Copy)]
 enum TaskKind {
+    ProjectInitialization,
     Checkpoint,
     Render,
     Reconciliation,
@@ -2858,6 +3352,7 @@ enum TaskKind {
 impl TaskKind {
     const fn directory(self) -> &'static str {
         match self {
+            Self::ProjectInitialization => "project-initializations",
             Self::Checkpoint => "checkpoints",
             Self::Render => "renders",
             Self::Reconciliation => "reconciliations",
@@ -2884,6 +3379,89 @@ fn require_revision(
     let actual = canonical.head()?;
     if actual != expected {
         return Err(ProjectOperationError::StaleRevision { expected, actual });
+    }
+    Ok(())
+}
+
+fn normalize_sha256(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_ascii_lowercase()
+    } else {
+        format!("sha256:{}", value.to_ascii_lowercase())
+    }
+}
+
+fn validate_project_initialization_execution_binding(
+    task: &ProjectInitializationTaskRecord,
+) -> Result<(), ProjectOperationError> {
+    match task.plan.mode {
+        ProjectInitializationMode::AdoptActive => {
+            if task.destination_path.is_some() || task.bridge_request.is_some() {
+                return Err(ProjectOperationError::InvalidProjectInitializationInput);
+            }
+        }
+        ProjectInitializationMode::SaveUntitled => {
+            let destination = task
+                .plan
+                .destination
+                .as_ref()
+                .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+            let path = task
+                .destination_path
+                .as_ref()
+                .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+            let request = task
+                .bridge_request
+                .as_ref()
+                .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+            let path_text = path.to_string_lossy();
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or(ProjectOperationError::InvalidProjectInitializationInput)?;
+            if request.operation_id != task.plan.operation_id
+                || request.overwrite
+                || normalize_sha256(&request.driver_profile_digest) != task.plan.capability_digest
+                || request.source_project_instance_id != task.plan.source.project_instance_id
+                || request.source_project_id != task.plan.source.project_id
+                || request.source_scene_id != task.plan.source.scene_id
+                || normalize_sha256(&request.expected_source_fingerprint)
+                    != task.plan.source.fingerprint
+                || request.destination_path != path_text
+                || normalize_sha256(&request.destination_path_digest) != destination.path_digest
+                || request.predicted_project_id != destination.project_id
+                || file_name != destination.file_name
+            {
+                return Err(ProjectOperationError::InvalidProjectInitializationInput);
+            }
+            let rebuilt = Ymm4ProjectInitializationRequest::new(
+                task.plan.operation_id,
+                &takegraph_node::Ymm4ProjectInitializationPreparation {
+                    protocol_version: request.protocol_version,
+                    driver_profile_digest: request.driver_profile_digest.clone(),
+                    source_project_instance_id: request.source_project_instance_id.clone(),
+                    source: Ymm4ProjectSnapshot {
+                        project_id: request.source_project_id.clone(),
+                        project_name: String::new(),
+                        project_path: String::new(),
+                        scene_id: request.source_scene_id.clone(),
+                        fps: 1,
+                        fingerprint: request.expected_source_fingerprint.clone(),
+                        managed_items: Vec::new(),
+                        native_extensions: Vec::new(),
+                        unmanaged_context_count: 0,
+                    },
+                    destination_path: request.destination_path.clone(),
+                    destination_path_digest: request.destination_path_digest.clone(),
+                    predicted_project_id: request.predicted_project_id.clone(),
+                    predicted_fingerprint: request.predicted_fingerprint.clone(),
+                    overwrite: false,
+                },
+            )?;
+            if rebuilt.request_digest != request.request_digest {
+                return Err(ProjectOperationError::InvalidProjectInitializationInput);
+            }
+        }
     }
     Ok(())
 }
@@ -3417,6 +3995,16 @@ fn verify_media_profile(
 
 #[derive(Debug, Error)]
 pub enum ProjectOperationError {
+    #[error("project initialization input does not match the requested mode")]
+    InvalidProjectInitializationInput,
+    #[error("canonical project is already initialized: {0}")]
+    CanonicalAlreadyInitialized(String),
+    #[error("project initialization did not return verified evidence")]
+    ProjectInitializationNotVerified,
+    #[error("project initialization transition is invalid from {0:?}")]
+    InvalidProjectInitializationTransition(ProjectInitializationTaskStatus),
+    #[error("project initialization approval does not match the staged plan digest")]
+    ProjectInitializationApprovalMismatch,
     #[error("project has no existing path; Save As is not authorized")]
     UnsavedProject,
     #[error("bridge checkpoint profile is not existing-path-only or has no digest")]
@@ -3524,6 +4112,8 @@ pub enum ProjectOperationError {
     #[error(transparent)]
     Patch(#[from] PatchError),
     #[error(transparent)]
+    ProjectInitializationPlan(#[from] ProjectInitializationPlanError),
+    #[error(transparent)]
     Canonical(#[from] CanonicalError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -3549,10 +4139,57 @@ mod tests {
     use takegraph_core::{ManagedSemanticValue, ReconciliationChoice};
     use takegraph_node::{
         CapabilityValue, StructuredYmm4Capabilities, Ymm4Capabilities, Ymm4Capability, Ymm4Health,
+        Ymm4ProjectInitializationPreparation, Ymm4ProjectInitializationReceipt,
     };
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(format!("takegraph-project-operations-{}", Uuid::new_v4()))
+    }
+
+    fn serve_json_once<T: serde::Serialize>(value: &T) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let response_body = serde_json::to_vec(value).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (header_end, content_length) = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                bytes.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':').and_then(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                        })
+                        .unwrap_or(0);
+                    break (header_end, content_length);
+                }
+            };
+            while bytes.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert_ne!(read, 0, "request ended before its body");
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len(),
+            )
+            .unwrap();
+            stream.write_all(&response_body).unwrap();
+        });
+        (format!("http://{address}"), server)
     }
 
     fn checkpoint() -> CheckpointTaskRecord {
@@ -4497,6 +5134,625 @@ mod tests {
             store.verify_materialized_children(&parent, &preview),
             Err(ProjectOperationError::InvalidReconciliationChildren)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_initialization_approval_is_exact_and_durable() {
+        let root = test_root();
+        let store = ProjectOperationStore::new(&root);
+        let operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::AdoptActive,
+            ProjectInitializationSource {
+                project_id: "project-a".into(),
+                scene_id: "scene-a".into(),
+                fingerprint: digest('a'),
+                project_instance_id: "instance-a".into(),
+                project_path_digest: Some(digest('b')),
+            },
+            None,
+            RevisionId(3),
+            true,
+            digest('c'),
+        )
+        .unwrap();
+        let payload = ProjectInitializationTaskRecord {
+            plan: plan.clone(),
+            destination_path: None,
+            bridge_request: None,
+            approved_plan_digest: None,
+            status: ProjectInitializationTaskStatus::Staged,
+            result_project_id: None,
+            result_scene_id: None,
+            canonical_revision: None,
+            canonical_created: None,
+            execution_replayed: false,
+            error: None,
+        };
+        store.append_project_initialization(&payload, None).unwrap();
+
+        assert!(matches!(
+            store.approve_project_initialization(operation_id, &digest('d')),
+            Err(ProjectOperationError::ProjectInitializationApprovalMismatch)
+        ));
+        let approved = store
+            .approve_project_initialization(operation_id, &plan.plan_digest)
+            .unwrap();
+        assert_eq!(
+            approved.payload.status,
+            ProjectInitializationTaskStatus::Approved
+        );
+        assert_eq!(
+            approved.payload.approved_plan_digest.as_deref(),
+            Some(plan.plan_digest.as_str())
+        );
+        assert_eq!(
+            store.project_initialization_status(operation_id).unwrap(),
+            approved
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_initialization_execution_rejects_rebound_bridge_request() {
+        let operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let destination_path = std::env::temp_dir().join("approved.ymmp");
+        let preparation = takegraph_node::Ymm4ProjectInitializationPreparation {
+            protocol_version: 2,
+            driver_profile_digest: digest('c'),
+            source_project_instance_id: "instance-a".into(),
+            source: Ymm4ProjectSnapshot {
+                project_id: "untitled-project".into(),
+                project_name: "untitled".into(),
+                project_path: String::new(),
+                scene_id: "scene-a".into(),
+                fps: 60,
+                fingerprint: digest('a'),
+                managed_items: Vec::new(),
+                native_extensions: Vec::new(),
+                unmanaged_context_count: 0,
+            },
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            destination_path_digest: digest('d'),
+            predicted_project_id: "saved-project".into(),
+            predicted_fingerprint: digest('e'),
+            overwrite: false,
+        };
+        let request = Ymm4ProjectInitializationRequest::new(operation_id, &preparation).unwrap();
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::SaveUntitled,
+            ProjectInitializationSource {
+                project_id: preparation.source.project_id.clone(),
+                scene_id: preparation.source.scene_id.clone(),
+                fingerprint: preparation.source.fingerprint.clone(),
+                project_instance_id: preparation.source_project_instance_id.clone(),
+                project_path_digest: None,
+            },
+            Some(takegraph_core::ProjectInitializationDestination {
+                project_id: preparation.predicted_project_id.clone(),
+                path_digest: preparation.destination_path_digest.clone(),
+                file_name: "approved.ymmp".into(),
+            }),
+            RevisionId(0),
+            false,
+            preparation.driver_profile_digest.clone(),
+        )
+        .unwrap();
+        let mut task = ProjectInitializationTaskRecord {
+            plan,
+            destination_path: Some(destination_path),
+            bridge_request: Some(request),
+            approved_plan_digest: None,
+            status: ProjectInitializationTaskStatus::Approved,
+            result_project_id: None,
+            result_scene_id: None,
+            canonical_revision: None,
+            canonical_created: None,
+            execution_replayed: false,
+            error: None,
+        };
+        validate_project_initialization_execution_binding(&task).unwrap();
+        task.bridge_request.as_mut().unwrap().predicted_project_id = "other-project".into();
+        assert!(matches!(
+            validate_project_initialization_execution_binding(&task),
+            Err(ProjectOperationError::InvalidProjectInitializationInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn adopt_initialization_conflicts_when_another_operation_wins() {
+        let root = test_root();
+        let operation_root = root.join("operations");
+        let canonical_root = root.join("canonical");
+        let operation_id = Uuid::new_v4();
+        let winning_operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::AdoptActive,
+            ProjectInitializationSource {
+                project_id: "project-a".into(),
+                scene_id: "scene-a".into(),
+                fingerprint: digest('a'),
+                project_instance_id: "instance-a".into(),
+                project_path_digest: Some(digest('b')),
+            },
+            None,
+            RevisionId(0),
+            false,
+            digest('c'),
+        )
+        .unwrap();
+        let store = ProjectOperationStore::new(&operation_root);
+        store
+            .append_project_initialization(
+                &ProjectInitializationTaskRecord {
+                    plan: plan.clone(),
+                    destination_path: None,
+                    bridge_request: None,
+                    approved_plan_digest: Some(plan.plan_digest.clone()),
+                    status: ProjectInitializationTaskStatus::Approved,
+                    result_project_id: None,
+                    result_scene_id: None,
+                    canonical_revision: None,
+                    canonical_created: None,
+                    execution_replayed: false,
+                    error: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let winner_digest = digest('d');
+        let (winner, _) = DurableProjectStore::reserve_scoped_initialization(
+            &canonical_root,
+            "project-a",
+            winning_operation_id,
+            &winner_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        winner
+            .complete_reserved_initialization(winning_operation_id, &winner_digest)
+            .unwrap();
+
+        let client = Ymm4BridgeClient::new("http://127.0.0.1:9", "unused").unwrap();
+        assert!(matches!(
+            store
+                .execute_project_initialization(&canonical_root, &client, operation_id)
+                .await,
+            Err(ProjectOperationError::CanonicalAlreadyInitialized(project_id))
+                if project_id == "project-a"
+        ));
+        let durable = store.project_initialization_status(operation_id).unwrap();
+        assert_eq!(
+            durable.payload.status,
+            ProjectInitializationTaskStatus::Conflicted
+        );
+        assert!(durable.payload.result_project_id.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn adopt_initialization_replays_completed_canonical_without_live_binding() {
+        let root = test_root();
+        let operation_root = root.join("operations");
+        let canonical_root = root.join("canonical");
+        let operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::AdoptActive,
+            ProjectInitializationSource {
+                project_id: "project-a".into(),
+                scene_id: "scene-a".into(),
+                fingerprint: digest('a'),
+                project_instance_id: "instance-a".into(),
+                project_path_digest: Some(digest('b')),
+            },
+            None,
+            RevisionId(0),
+            false,
+            digest('c'),
+        )
+        .unwrap();
+        let store = ProjectOperationStore::new(&operation_root);
+        store
+            .append_project_initialization(
+                &ProjectInitializationTaskRecord {
+                    plan: plan.clone(),
+                    destination_path: None,
+                    bridge_request: None,
+                    approved_plan_digest: Some(plan.plan_digest.clone()),
+                    status: ProjectInitializationTaskStatus::Executing,
+                    result_project_id: None,
+                    result_scene_id: None,
+                    canonical_revision: None,
+                    canonical_created: None,
+                    execution_replayed: false,
+                    error: None,
+                },
+                None,
+            )
+            .unwrap();
+        let (canonical, _) = DurableProjectStore::reserve_scoped_initialization(
+            &canonical_root,
+            "project-a",
+            operation_id,
+            &plan.plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        canonical
+            .complete_reserved_initialization(operation_id, &plan.plan_digest)
+            .unwrap();
+
+        // No server is listening. Exact canonical completion is enough to
+        // finish the service journal after a crash, even if YMM4 later changed.
+        let client = Ymm4BridgeClient::new("http://127.0.0.1:9", "unused").unwrap();
+        let replayed = store
+            .execute_project_initialization(&canonical_root, &client, operation_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed.payload.status,
+            ProjectInitializationTaskStatus::Initialized
+        );
+        assert!(replayed.payload.execution_replayed);
+        assert_eq!(
+            replayed.payload.result_project_id.as_deref(),
+            Some("project-a")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn failed_no_write_initialization_releases_canonical_reservation() {
+        let root = test_root();
+        let operation_root = root.join("operations");
+        let canonical_root = root.join("canonical");
+        let destination_path = root.join("movie.ymmp");
+        let operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let source_snapshot = Ymm4ProjectSnapshot {
+            project_id: "untitled-project".into(),
+            project_name: "untitled".into(),
+            project_path: String::new(),
+            scene_id: "scene-a".into(),
+            fps: 60,
+            fingerprint: digest('a'),
+            managed_items: Vec::new(),
+            native_extensions: Vec::new(),
+            unmanaged_context_count: 0,
+        };
+        let preparation = Ymm4ProjectInitializationPreparation {
+            protocol_version: 2,
+            driver_profile_digest: digest('b'),
+            source_project_instance_id: "instance-a".into(),
+            source: source_snapshot.clone(),
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            destination_path_digest: digest('c'),
+            predicted_project_id: "saved-project".into(),
+            predicted_fingerprint: digest('d'),
+            overwrite: false,
+        };
+        let request = Ymm4ProjectInitializationRequest::new(operation_id, &preparation).unwrap();
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::SaveUntitled,
+            ProjectInitializationSource {
+                project_id: source_snapshot.project_id.clone(),
+                scene_id: source_snapshot.scene_id.clone(),
+                fingerprint: source_snapshot.fingerprint.clone(),
+                project_instance_id: preparation.source_project_instance_id.clone(),
+                project_path_digest: None,
+            },
+            Some(takegraph_core::ProjectInitializationDestination {
+                project_id: preparation.predicted_project_id.clone(),
+                path_digest: preparation.destination_path_digest.clone(),
+                file_name: "movie.ymmp".into(),
+            }),
+            RevisionId(0),
+            false,
+            preparation.driver_profile_digest.clone(),
+        )
+        .unwrap();
+        let store = ProjectOperationStore::new(&operation_root);
+        store
+            .append_project_initialization(
+                &ProjectInitializationTaskRecord {
+                    plan: plan.clone(),
+                    destination_path: Some(destination_path),
+                    bridge_request: Some(request.clone()),
+                    approved_plan_digest: Some(plan.plan_digest.clone()),
+                    status: ProjectInitializationTaskStatus::Approved,
+                    result_project_id: None,
+                    result_scene_id: None,
+                    canonical_revision: None,
+                    canonical_created: None,
+                    execution_replayed: false,
+                    error: None,
+                },
+                None,
+            )
+            .unwrap();
+        let receipt = Ymm4ProjectInitializationReceipt {
+            operation_id,
+            request_digest: request.request_digest.clone(),
+            status: Ymm4ProjectInitializationStatus::Failed,
+            driver_profile_digest: request.driver_profile_digest.clone(),
+            source_project_instance_id: request.source_project_instance_id.clone(),
+            source_project_id: request.source_project_id.clone(),
+            source_scene_id: request.source_scene_id.clone(),
+            before_fingerprint: request.expected_source_fingerprint.clone(),
+            destination_path: request.destination_path.clone(),
+            destination_path_digest: request.destination_path_digest.clone(),
+            predicted_project_id: request.predicted_project_id.clone(),
+            predicted_fingerprint: request.predicted_fingerprint.clone(),
+            prepared_temporary_path: None,
+            prepared_file_sha256: None,
+            prepared_file_bytes: None,
+            after_snapshot: Some(source_snapshot),
+            file_sha256: None,
+            file_bytes: None,
+            error: Some("destination was claimed before any target write".into()),
+        };
+        let (base_url, server) = serve_json_once(&receipt);
+        let client = Ymm4BridgeClient::new(&base_url, "secret").unwrap();
+        assert!(matches!(
+            store
+                .execute_project_initialization(&canonical_root, &client, operation_id)
+                .await,
+            Err(ProjectOperationError::ProjectInitializationNotVerified)
+        ));
+        server.join().unwrap();
+
+        let failed = store.project_initialization_status(operation_id).unwrap();
+        assert_eq!(
+            failed.payload.status,
+            ProjectInitializationTaskStatus::Failed
+        );
+        assert_eq!(failed.payload.error, receipt.error);
+
+        let replacement_operation_id = Uuid::new_v4();
+        let (_, replacement) = DurableProjectStore::reserve_scoped_initialization(
+            &canonical_root,
+            &preparation.predicted_project_id,
+            replacement_operation_id,
+            digest('e'),
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(
+            replacement,
+            crate::ProjectInitializationReservationOutcome::Reserved
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // End-to-end restart replay fixture keeps the exact HTTP request and durable assertions together.
+    async fn executing_project_initialization_replays_exact_request_after_restart() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let root = test_root();
+        let operation_root = root.join("operations");
+        let canonical_root = root.join("canonical");
+        let destination_path = root.join("movie.ymmp");
+        let operation_id = Uuid::new_v4();
+        let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+        let source_snapshot = Ymm4ProjectSnapshot {
+            project_id: "untitled-project".into(),
+            project_name: "untitled".into(),
+            project_path: String::new(),
+            scene_id: "scene-a".into(),
+            fps: 60,
+            fingerprint: digest('a'),
+            managed_items: Vec::new(),
+            native_extensions: Vec::new(),
+            unmanaged_context_count: 0,
+        };
+        let preparation = Ymm4ProjectInitializationPreparation {
+            protocol_version: 2,
+            driver_profile_digest: digest('b'),
+            source_project_instance_id: "instance-a".into(),
+            source: source_snapshot.clone(),
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            destination_path_digest: digest('c'),
+            predicted_project_id: "saved-project".into(),
+            predicted_fingerprint: digest('d'),
+            overwrite: false,
+        };
+        let request = Ymm4ProjectInitializationRequest::new(operation_id, &preparation).unwrap();
+        let plan = ProjectInitializationPlan::build(
+            operation_id,
+            ProjectInitializationMode::SaveUntitled,
+            ProjectInitializationSource {
+                project_id: source_snapshot.project_id.clone(),
+                scene_id: source_snapshot.scene_id.clone(),
+                fingerprint: source_snapshot.fingerprint.clone(),
+                project_instance_id: preparation.source_project_instance_id.clone(),
+                project_path_digest: None,
+            },
+            Some(takegraph_core::ProjectInitializationDestination {
+                project_id: preparation.predicted_project_id.clone(),
+                path_digest: preparation.destination_path_digest.clone(),
+                file_name: "movie.ymmp".into(),
+            }),
+            RevisionId(0),
+            false,
+            preparation.driver_profile_digest.clone(),
+        )
+        .unwrap();
+        let store = ProjectOperationStore::new(&operation_root);
+        store
+            .append_project_initialization(
+                &ProjectInitializationTaskRecord {
+                    plan: plan.clone(),
+                    destination_path: Some(destination_path.clone()),
+                    bridge_request: Some(request.clone()),
+                    approved_plan_digest: Some(plan.plan_digest.clone()),
+                    status: ProjectInitializationTaskStatus::Executing,
+                    result_project_id: None,
+                    result_scene_id: None,
+                    canonical_revision: None,
+                    canonical_created: None,
+                    execution_replayed: false,
+                    error: Some("transport outcome was unknown".into()),
+                },
+                None,
+            )
+            .unwrap();
+        let (canonical, reservation) = DurableProjectStore::reserve_scoped_initialization(
+            &canonical_root,
+            &preparation.predicted_project_id,
+            operation_id,
+            &plan.plan_digest,
+            RevisionId(0),
+        )
+        .unwrap();
+        assert_eq!(
+            reservation,
+            crate::ProjectInitializationReservationOutcome::Reserved
+        );
+        drop(canonical);
+        drop(store);
+
+        let after_snapshot = Ymm4ProjectSnapshot {
+            project_id: preparation.predicted_project_id.clone(),
+            project_name: "movie".into(),
+            project_path: preparation.destination_path.clone(),
+            scene_id: source_snapshot.scene_id.clone(),
+            fps: 60,
+            fingerprint: preparation.predicted_fingerprint.clone(),
+            managed_items: Vec::new(),
+            native_extensions: Vec::new(),
+            unmanaged_context_count: 0,
+        };
+        let receipt = Ymm4ProjectInitializationReceipt {
+            operation_id,
+            request_digest: request.request_digest.clone(),
+            status: Ymm4ProjectInitializationStatus::Replayed,
+            driver_profile_digest: request.driver_profile_digest.clone(),
+            source_project_instance_id: request.source_project_instance_id.clone(),
+            source_project_id: request.source_project_id.clone(),
+            source_scene_id: request.source_scene_id.clone(),
+            before_fingerprint: request.expected_source_fingerprint.clone(),
+            destination_path: request.destination_path.clone(),
+            destination_path_digest: request.destination_path_digest.clone(),
+            predicted_project_id: request.predicted_project_id.clone(),
+            predicted_fingerprint: request.predicted_fingerprint.clone(),
+            prepared_temporary_path: Some(
+                destination_path
+                    .with_file_name(format!(".takegraph-project-{}.ymmp", "1".repeat(32)))
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            prepared_file_sha256: Some(digest('e')),
+            prepared_file_bytes: Some(42),
+            after_snapshot: Some(after_snapshot),
+            file_sha256: Some(digest('e')),
+            file_bytes: Some(42),
+            error: None,
+        };
+        let response_body = serde_json::to_vec(&receipt).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (header_end, content_length) = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                bytes.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':').and_then(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                        })
+                        .unwrap();
+                    break (header_end, content_length);
+                }
+            };
+            while bytes.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert_ne!(read, 0, "request ended before its JSON body");
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            let request_line = String::from_utf8_lossy(&bytes[..header_end])
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned();
+            let received: Ymm4ProjectInitializationRequest =
+                serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len(),
+            )
+            .unwrap();
+            stream.write_all(&response_body).unwrap();
+            (request_line, received)
+        });
+        let client = Ymm4BridgeClient::new(&format!("http://{address}"), "secret").unwrap();
+        let reopened = ProjectOperationStore::new(&operation_root);
+        let completed = reopened
+            .execute_project_initialization(&canonical_root, &client, operation_id)
+            .await
+            .unwrap();
+        let (request_line, received_request) = server.join().unwrap();
+        assert_eq!(
+            request_line,
+            "POST /v2/project/initialization/apply HTTP/1.1"
+        );
+        assert_eq!(received_request, request);
+        assert_eq!(
+            completed.payload.status,
+            ProjectInitializationTaskStatus::Initialized
+        );
+        assert_eq!(completed.payload.canonical_created, Some(true));
+        assert!(!completed.payload.execution_replayed);
+        assert!(completed.payload.error.is_none());
+        assert_eq!(
+            DurableProjectStore::observe_scoped(&canonical_root, "saved-project")
+                .unwrap()
+                .unwrap()
+                .head,
+            RevisionId(0)
+        );
+
+        // A terminal retry is answered entirely from durable state; the
+        // now-closed one-shot bridge is deliberately not contacted again.
+        let replayed = reopened
+            .execute_project_initialization(&canonical_root, &client, operation_id)
+            .await
+            .unwrap();
+        assert_eq!(replayed.generation, completed.generation);
+        assert_eq!(replayed.record_digest, completed.record_digest);
+        assert!(replayed.payload.execution_replayed);
+        assert!(
+            !reopened
+                .project_initialization_status(operation_id)
+                .unwrap()
+                .payload
+                .execution_replayed
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

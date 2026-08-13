@@ -430,7 +430,8 @@ internal sealed partial class Ymm4Facade
         ICollection<string> actions,
         ISet<string> entityIds,
         ISet<Guid> realizationIds,
-        bool validateCurrentCapability = true)
+        bool validateCurrentCapability = true,
+        bool timelineEdit = false)
     {
         RequireExactJsonProperties(
             cue,
@@ -510,7 +511,7 @@ internal sealed partial class Ymm4Facade
         var ownership = RequireJsonObject(cue, "ownership");
         var resolved = RequireJsonObject(cue, "resolvedRealization");
         var bindings = RequireJsonArray(cue, "bindingDependencies").EnumerateArray().ToArray();
-        ValidateCueCapabilities(cue, strategy, validateCurrentCapability);
+        ValidateCueCapabilities(cue, strategy, validateCurrentCapability, timelineEdit);
         if (strategy == "portable_pair")
         {
             if (RequireJsonString(intent, "realizationPreference") != "require_portable"
@@ -546,12 +547,18 @@ internal sealed partial class Ymm4Facade
             {
                 throw new BridgeValidationException("Portable audio artifact binding is invalid");
             }
-            RequireExactJsonProperties(resolved, "kind", "audioPath", "artifactDigest");
-            var audioPath = RequireJsonString(resolved, "audioPath");
+            var portableAudioPathField = timelineEdit ? "audio_path" : "audioPath";
+            var portableArtifactField = timelineEdit ? "artifact_digest" : "artifactDigest";
+            RequireExactJsonProperties(
+                resolved,
+                "kind",
+                portableAudioPathField,
+                portableArtifactField);
+            var audioPath = RequireJsonString(resolved, portableAudioPathField);
             if (RequireJsonString(resolved, "kind") != "portable_pair"
                 || !ApplyRequestDigest.Matches(
                     RequireSha256(
-                        RequireJsonString(resolved, "artifactDigest"),
+                        RequireJsonString(resolved, portableArtifactField),
                         "resolved portable artifactDigest"),
                     artifactDigest))
             {
@@ -582,12 +589,13 @@ internal sealed partial class Ymm4Facade
             throw new BridgeValidationException(
                 "Native-voice strategy, text, action, or placement is inconsistent");
         }
-        RequireExactJsonProperties(duration, "kind", "maxFrames");
+        var nativeMaxFramesField = timelineEdit ? "max_frames" : "maxFrames";
+        RequireExactJsonProperties(duration, "kind", nativeMaxFramesField);
         if (RequireJsonString(duration, "kind") != "bounded")
         {
             throw new BridgeValidationException("Native-voice duration must be bounded");
         }
-        var maxLength = RequirePositiveJsonInt(duration, "maxFrames");
+        var maxLength = RequirePositiveJsonInt(duration, nativeMaxFramesField);
         ValidateOwnership(ownership, portableStrategy: false);
         if (bindings.Length != 1)
         {
@@ -610,16 +618,20 @@ internal sealed partial class Ymm4Facade
         {
             throw new BridgeValidationException("Native character binding is invalid");
         }
+        var nativeCharacterField = timelineEdit ? "character_name" : "characterName";
+        var nativeBindingField = timelineEdit
+            ? "character_binding_digest"
+            : "characterBindingDigest";
         RequireExactJsonProperties(
             resolved,
             "kind",
-            "characterName",
-            "characterBindingDigest");
+            nativeCharacterField,
+            nativeBindingField);
         if (RequireJsonString(resolved, "kind") != "native_voice"
-            || RequireJsonString(resolved, "characterName") != characterName
+            || RequireJsonString(resolved, nativeCharacterField) != characterName
             || !ApplyRequestDigest.Matches(
                 RequireSha256(
-                    RequireJsonString(resolved, "characterBindingDigest"),
+                    RequireJsonString(resolved, nativeBindingField),
                     "resolved character binding digest"),
                 characterDigest))
         {
@@ -647,6 +659,19 @@ internal sealed partial class Ymm4Facade
             new List<string>(),
             new HashSet<string>(StringComparer.Ordinal),
             new HashSet<Guid>());
+    }
+
+    internal static void ValidateTimelineEditCueContract(JsonElement cue)
+    {
+        ParseTargetPlanCue(
+            cue,
+            new List<ManagedUtteranceDto>(),
+            new List<NativeVoiceCueDto>(),
+            new List<string>(),
+            new HashSet<string>(StringComparer.Ordinal),
+            new HashSet<Guid>(),
+            validateCurrentCapability: false,
+            timelineEdit: true);
     }
 
     internal static void ValidatePortableTargetPlanActions(
@@ -720,9 +745,10 @@ internal sealed partial class Ymm4Facade
     private static void ValidateCueCapabilities(
         JsonElement cue,
         string strategy,
-        bool validateCurrentCapability)
+        bool validateCurrentCapability,
+        bool timelineEdit = false)
     {
-        var expected = strategy switch
+        var expected = (strategy switch
         {
             "portable_pair" => new[]
             {
@@ -739,11 +765,15 @@ internal sealed partial class Ymm4Facade
                 "readback.semantic",
             },
             _ => throw new BridgeValidationException($"Unknown target-plan strategy: {strategy}"),
-        };
+        }).ToList();
+        if (timelineEdit)
+        {
+            expected.Add("timelineEdit.apply");
+        }
         var dependencies = RequireJsonArray(cue, "capabilityDependencies")
             .EnumerateArray()
             .ToArray();
-        if (dependencies.Length != expected.Length)
+        if (dependencies.Length != expected.Count)
         {
             throw new BridgeValidationException(
                 "Target-plan capability dependencies are incomplete");
