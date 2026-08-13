@@ -17,7 +17,8 @@ pub use managed_cue::{
     OwnershipMask, PlacementIntent, PlanWarning, PlannedAction, PlannedCue,
     RealizationAvailability, RealizationPreference, RealizationStrategy, ResolvedPlacement,
     ResolvedRealization, ScopeFingerprints, StrategySelection, TARGET_PLAN_CANONICAL_VERSION,
-    TargetIdentity, TargetPlan, TargetPlanError, TargetReference, TimingAnchor, canonical_sha256,
+    TargetIdentity, TargetPlan, TargetPlanError, TargetReference, TimingAnchor,
+    approval_digests_match, canonical_sha256,
 };
 pub use native_extension::{
     AssetClipIntent, AssetKind, CharacterDescriptor, DescriptorDependency, DescriptorKind,

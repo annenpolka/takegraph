@@ -5,7 +5,7 @@ use takegraph_core::{
     CapabilityDependency, ChangeBudget, Patch, PatchError, PatchStatus, PlanWarning, RevisionId,
     TARGET_PLAN_CANONICAL_VERSION, TIMELINE_EDIT_MAX_OPERATIONS,
     TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TargetPlan, TimelineEditOperation, TimelineEditPlan,
-    canonical_sha256,
+    approval_digests_match, canonical_sha256,
 };
 use takegraph_node::{
     CapabilityRequirement, ManagedUtterance, StructuredYmm4Capabilities, Ymm4BridgeClient,
@@ -237,7 +237,7 @@ impl Ymm4TimelineEditTask {
             }
             .into());
         }
-        if approved_digest != self.patch.digest {
+        if !approval_digests_match(&self.patch.digest, approved_digest) {
             return Err(Ymm4TimelineEditError::ApprovalDigestMismatch);
         }
         if self.patch.status == PatchStatus::Previewable {

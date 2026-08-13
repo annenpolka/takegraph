@@ -1,6 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use takegraph_core::{Patch, PatchError, PatchStatus, RevisionId, TargetPlan, canonical_sha256};
+use takegraph_core::{
+    Patch, PatchError, PatchStatus, RevisionId, TargetPlan, approval_digests_match,
+    canonical_sha256,
+};
 use takegraph_node::{
     CapabilityRequirement, ManagedItemKind, ManagedUtterance, Ymm4BridgeClient, Ymm4Error,
     Ymm4ManagedItem, Ymm4OperationReceipt, Ymm4PlanResponse, Ymm4ProjectSnapshot,
@@ -278,7 +281,7 @@ impl Ymm4ExportPatch {
         current_head: RevisionId,
     ) -> Result<(), Ymm4ExportError> {
         self.validate_payload_digest()?;
-        if approved_digest != self.patch.digest {
+        if !approval_digests_match(&self.patch.digest, approved_digest) {
             return Err(Ymm4ExportError::DigestMismatch);
         }
         if self.patch.status == PatchStatus::Previewable {

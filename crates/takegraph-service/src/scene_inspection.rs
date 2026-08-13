@@ -12,7 +12,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use takegraph_core::RevisionId;
+use takegraph_core::{RevisionId, approval_digests_match};
 use takegraph_node::{
     ImportedSceneCapture, SCENE_PIXEL_DETECTOR_VERSION, SceneInspectionFinding,
     SceneInspectionNodeError, SceneVisualCheckProfile, Ymm4BridgeClient, Ymm4Error,
@@ -218,7 +218,7 @@ impl SceneInspectionPlan {
         if &self.source != current_source {
             return Err(SceneInspectionError::StaleSource);
         }
-        if approved_digest != self.digest {
+        if !approval_digests_match(&self.digest, approved_digest) {
             return Err(SceneInspectionError::ApprovalDigestMismatch);
         }
         self.approved_digest = Some(self.digest.clone());
