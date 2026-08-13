@@ -58,6 +58,31 @@ are verified semantically instead of by requiring two physical items.
 Unrelated YMM4 items are counted for concurrency fingerprints but never
 rewritten.
 
+## Multi-edit execution model
+
+An edit task may contain an ordered batch of up to 128 same-transaction
+operations. The whole batch is staged against one canonical base revision and
+one target fingerprint, receives one approval digest, and advances the
+canonical project by one revision only after every operation passes semantic
+read-back.
+
+Preparation and commit have different concurrency rules. Independent media
+materialization and artifact verification may run concurrently, but their
+results are restored to the caller's deterministic operation order before the
+plan is sealed. YMM4 mutation remains serialized behind the bridge operation
+gate and the UI dispatcher. That serialization is the transaction boundary:
+one WAL/preimage covers the batch, a partial failure rolls back the whole
+batch, and an ambiguous rollback becomes `recovery_required` without a
+canonical revision change.
+
+The managed-cue aggregate exposed as MCP `kind=timeline_edit` can mix ordered
+portable and native voice creates because they are sealed into one target plan,
+one bridge WAL, one rollback boundary, and one aggregate receipt. This is not a
+facade that invokes the legacy routes in sequence. Native voice update/delete
+and native extensions remain on their separately guarded workflows until the
+aggregate plan and bridge receipt can represent them without weakening that
+atomicity claim.
+
 ## First invariants
 
 - A patch commits only from `Approved`.

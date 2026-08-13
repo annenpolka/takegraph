@@ -932,6 +932,10 @@ also requires CLI `--output-task`; MCP returns the new downstream `handle`,
 the saved exporter task directly. The workflow obtains the canonical revision
 from `canonical-head`; it does not maintain an independent `revision.json`
 mirror.
+When the active project has no approved initialization, `canonical-head`
+returns `initialized: false` with a null revision. This read never creates a
+store; ordinary workflows require the explicit `project_initialization`
+lifecycle first.
 For every canonical-store exporter operation, MCP forwards the same configured
 `projectStateRoot` used by `canonical-head`: portable and native-voice
 stage/commit, native-voice-mutation stage/commit, and native-extension
@@ -941,8 +945,8 @@ Both default MCP roots honor the same `TAKEGRAPH_PROJECT_STATE_ROOT` and
 `TAKEGRAPH_PROJECT_OPERATION_ROOT` environment variables as the CLI. The
 workflow also retains `{projectId, revision}` from `canonical-head` and pins all
 snapshot-dependent follow-up commands with `--expected-project-id`; an active
-YMM4 project switch therefore fails before a different project can bootstrap or
-mutate the selected canonical store.
+YMM4 project switch therefore fails before a different project's canonical
+store can be accessed or its target can be mutated.
 
 ## Verification plan
 

@@ -139,6 +139,7 @@ impl Ymm4NativeVoiceMutationPatch {
                 "operation ID must not be nil".into(),
             ));
         }
+        crate::require_existing_project_path(&target.project_path)?;
         validate_mutations(&mutations)?;
         let capabilities = client.structured_capabilities().await?;
         let capability_requirements = mutation_capability_requirements(&capabilities, &mutations)?;
@@ -340,6 +341,8 @@ impl Ymm4NativeVoiceMutationPatch {
         current_head: RevisionId,
     ) -> Result<crate::DurableExternalMutationOutcome, Ymm4NativeVoiceMutationError> {
         self.validate_payload_digest()?;
+        crate::require_existing_project_path(&self.target.project_path)?;
+        crate::require_existing_project_path(&client.snapshot().await?.project_path)?;
         crate::external_mutation::authorize_external_patch(&self.patch)?;
         let request = self.apply_request();
         let target = crate::VerifiedTargetBinding {
@@ -1102,6 +1105,8 @@ pub enum Ymm4NativeVoiceMutationError {
     ProjectStore(#[from] crate::ProjectStoreError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    UnsavedProject(#[from] crate::UnsavedProjectError),
     #[error("invalid native voice mutation: {0}")]
     InvalidMutation(String),
     #[error("invalid native voice mutation plan: {0}")]

@@ -27,6 +27,7 @@ internal static class BridgeJson
 internal sealed class BridgeHost : IDisposable
 {
     internal static string BaseUrl => $"http://127.0.0.1:{BridgeContract.Port}/";
+    internal const string CurrentCompositionPath = "/v2/scene/composition/current";
 
     private readonly HttpListener listener = new();
     private readonly CancellationTokenSource cancellation = new();
@@ -119,6 +120,17 @@ internal sealed class BridgeHost : IDisposable
             {
                 response = facade.RecoveryStatus();
             }
+            else if (method == "POST"
+                && path.StartsWith("/v2/recovery/", StringComparison.Ordinal)
+                && path.EndsWith("/acknowledge", StringComparison.Ordinal))
+            {
+                var idText = path["/v2/recovery/".Length..^"/acknowledge".Length];
+                if (!Guid.TryParse(idText, out var recoveryOperationId))
+                {
+                    throw new BridgeValidationException("Invalid recovery operation ID");
+                }
+                response = facade.AcknowledgeRecoveryRequired(recoveryOperationId);
+            }
             else if (method == "GET" && path == "/v2/project/checkpoint-profile")
             {
                 response = facade.CheckpointProfile();
@@ -137,6 +149,30 @@ internal sealed class BridgeHost : IDisposable
                     throw new BridgeValidationException("Invalid checkpoint operation ID");
                 }
                 response = facade.GetCheckpoint(checkpointId);
+            }
+            else if (method == "POST" && path == "/v2/project/initialization/prepare")
+            {
+                response = facade.PrepareProjectInitialization(
+                    await ReadJsonAsync<ProjectInitializationPrepareRequestDto>(context.Request));
+            }
+            else if (method == "GET" && path == "/v2/project/instance-binding")
+            {
+                response = facade.ProjectInstanceBinding();
+            }
+            else if (method == "POST" && path == "/v2/project/initialization/apply")
+            {
+                response = await facade.InitializeProjectAsync(
+                    await ReadJsonAsync<ProjectInitializationRequestDto>(context.Request));
+            }
+            else if (method == "GET"
+                && path.StartsWith("/v2/project/initialization/", StringComparison.Ordinal))
+            {
+                var idText = path["/v2/project/initialization/".Length..];
+                if (!Guid.TryParse(idText, out var initializationId))
+                {
+                    throw new BridgeValidationException("Invalid project initialization operation ID");
+                }
+                response = facade.GetProjectInitialization(initializationId);
             }
             else if (method == "GET" && path == "/v2/render/profiles")
             {
@@ -178,6 +214,10 @@ internal sealed class BridgeHost : IDisposable
             else if (method == "GET" && path == "/v1/project/snapshot")
             {
                 response = facade.Snapshot();
+            }
+            else if (method == "GET" && path == CurrentCompositionPath)
+            {
+                response = await facade.CurrentSceneCompositionAsync();
             }
             else if (method == "GET" && path == "/v1/project/controls")
             {
@@ -221,6 +261,21 @@ internal sealed class BridgeHost : IDisposable
             {
                 response = await facade.SealTargetPlanNotStartedAsync(
                     await ReadJsonAsync<TargetPlanApplyRequestDto>(context.Request));
+            }
+            else if (method == "POST" && path == "/v2/timeline-edit/apply")
+            {
+                response = await facade.ApplyTimelineEditAsync(
+                    await ReadJsonAsync<TimelineEditApplyRequestDto>(context.Request));
+            }
+            else if (method == "POST" && path == "/v2/timeline-edit/validate")
+            {
+                response = facade.ValidateTimelineEdit(
+                    await ReadJsonAsync<TimelineEditValidationRequestDto>(context.Request));
+            }
+            else if (method == "POST" && path == "/v2/timeline-edit/not-started")
+            {
+                response = await facade.SealTimelineEditNotStartedAsync(
+                    await ReadJsonAsync<TimelineEditApplyRequestDto>(context.Request));
             }
             else if (method == "POST" && path == "/v2/native-voice/plan")
             {

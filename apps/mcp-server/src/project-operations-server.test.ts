@@ -4,7 +4,10 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ProjectSession } from "./project-session.js";
-import { createServer } from "./server.js";
+import {
+  createServer as createBaseServer,
+  type CreateServerOptions,
+} from "./server.js";
 import {
   type ReconciliationDecisionInput,
   type StageRenderInput,
@@ -16,6 +19,10 @@ const renderId = "22222222-2222-4222-8222-222222222222";
 const reportDigest = "a".repeat(64);
 const approvalDigest = "b".repeat(64);
 const childTaskId = "c".repeat(64);
+
+function createServer(options: CreateServerOptions = {}) {
+  return createBaseServer({ ...options, legacyTools: true });
+}
 
 test("MCP exposes the guarded Phase 5 checkpoint, render, and reconcile surface", async (t) => {
   const calls: string[] = [];

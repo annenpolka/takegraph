@@ -7,7 +7,10 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ProjectSession, type ProjectState } from "./project-session.js";
-import { createServer } from "./server.js";
+import {
+  createServer as createBaseServer,
+  type CreateServerOptions,
+} from "./server.js";
 import {
   type StageSceneInspectionInput,
   type StageNativeVoiceInput,
@@ -17,12 +20,23 @@ import {
 
 const resourceUri = "ui://takegraph/editor/v1.html";
 
+function createServer(options: CreateServerOptions = {}) {
+  return createBaseServer({ ...options, legacyTools: true });
+}
+
 function stateFrom(result: unknown): ProjectState {
   const state = (
     result as { structuredContent?: { state?: ProjectState } }
   ).structuredContent?.state;
   assert.ok(state, "tool result should include project state");
   return state;
+}
+
+function textFrom(result: unknown): string {
+  const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
+  const text = content?.find((item) => item.type === "text")?.text;
+  assert.ok(text, "tool result should include agent-visible text");
+  return text;
 }
 
 test("MCP client can open the app and complete a digest-bound take patch", async (t) => {
@@ -53,7 +67,7 @@ test("MCP client can open the app and complete a digest-bound take patch", async
   );
   assert.deepEqual(
     (opener._meta?.ui as { visibility?: string[] } | undefined)?.visibility,
-    ["model", "app"],
+    ["app"],
   );
   const appOnlyStateTool = listed.tools.find(
     (tool) => tool.name === "studio_ui_get_state",
@@ -71,6 +85,12 @@ test("MCP client can open the app and complete a digest-bound take patch", async
   const initial = stateFrom(described);
   assert.equal(initial.revision, 0);
   assert.equal(initial.activeTakeId, "take-a");
+  const describedText = textFrom(described);
+  assert.match(describedText, /store: studio-session/);
+  assert.match(describedText, /sessionRevision: 0/);
+  assert.match(describedText, /utt-01/);
+  assert.match(describedText, /take-b/);
+  assert.match(describedText, /not the canonical/);
 
   const resource = await client.readResource({ uri: resourceUri });
   assert.equal(resource.contents[0]?.mimeType, "text/html;profile=mcp-app");
@@ -86,6 +106,8 @@ test("MCP client can open the app and complete a digest-bound take patch", async
   const afterGeneration = stateFrom(generated);
   assert.equal(afterGeneration.takes.length, initial.takes.length + 1);
   assert.equal(afterGeneration.takes.at(-1)?.readiness, "query-ready");
+  assert.match(textFrom(generated), new RegExp(afterGeneration.takes.at(-1)!.id));
+  assert.match(textFrom(generated), /query-ready/);
 
   const rejectedUnfinished = await client.callTool({
     name: "voice_stage_take_patch",
@@ -95,6 +117,8 @@ test("MCP client can open the app and complete a digest-bound take patch", async
     (rejectedUnfinished as { isError?: boolean }).isError,
     true,
   );
+  assert.match(textFrom(rejectedUnfinished), /query is ready|query-ready/);
+  assert.match(textFrom(rejectedUnfinished), /next:/);
 
   const staged = await client.callTool({
     name: "voice_stage_take_patch",
@@ -104,12 +128,17 @@ test("MCP client can open the app and complete a digest-bound take patch", async
   assert.ok(patch);
   assert.equal(patch.baseRevision, 0);
   assert.equal(patch.digest.length, 64);
+  const stagedText = textFrom(staged);
+  assert.match(stagedText, new RegExp(`patchId: ${patch.id}`));
+  assert.match(stagedText, new RegExp(`digest: ${patch.digest}`));
+  assert.match(stagedText, /studio_patch_commit/);
 
   const wrongApproval = await client.callTool({
     name: "studio_patch_commit",
     arguments: { patchId: patch.id, digest: "0".repeat(64) },
   });
   assert.equal((wrongApproval as { isError?: boolean }).isError, true);
+  assert.match(textFrom(wrongApproval), new RegExp(patch.digest));
 
   const committed = await client.callTool({
     name: "studio_patch_commit",
@@ -119,6 +148,63 @@ test("MCP client can open the app and complete a digest-bound take patch", async
   assert.equal(finalState.revision, 1);
   assert.equal(finalState.activeTakeId, "take-b");
   assert.equal(finalState.stagedPatch, undefined);
+  assert.match(textFrom(committed), /sessionRevision is now 1/);
+});
+
+test("takegraph_status reports both stores from the live studio session and mocked canonical head", async (t) => {
+  const workflow = {
+    async describe() {
+      return {
+        health: { status: "running", protocolVersion: 2 },
+        capabilities: { capabilities: ["native_voice_create"] },
+        snapshot: {
+          projectId: "proj-1",
+          projectName: "live",
+          projectPath: "",
+          sceneId: "scene-1",
+          fps: 60,
+          fingerprint: "fp",
+          managedItems: [],
+          nativeExtensions: [],
+          unmanagedContextCount: 0,
+        },
+      };
+    },
+    async canonicalHead() {
+      return { projectId: "proj-1", revision: 1 };
+    },
+  } as unknown as Ymm4Workflow;
+  const server = createServer({
+    session: new ProjectSession(),
+    viewHtml: "<!doctype html><html><body>TakeGraph test app</body></html>",
+    ymm4Workflow: workflow,
+  });
+  const client = new Client({ name: "takegraph-status-test", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const listed = await client.listTools();
+  assert.ok(listed.tools.some((tool) => tool.name === "takegraph_status"));
+
+  const guide = await client.readResource({ uri: "takegraph://guide" });
+  const guideText = "text" in guide.contents[0]! ? guide.contents[0].text : "";
+  assert.match(guideText, /Two stores/);
+
+  const status = await client.callTool({ name: "takegraph_status", arguments: {} });
+  const text = textFrom(status);
+  assert.match(text, /TakeGraph MCP guide/);
+  assert.match(text, /store: studio-session/);
+  assert.match(text, /sessionRevision: 0/);
+  assert.match(text, /store: canonical-project/);
+  assert.match(text, /canonicalRevision: 1/);
+  assert.match(text, /projectPath: \(unsaved\)/);
 });
 
 test("MCP native VoiceItem tools validate the v2 slice and delegate workflow", async (t) => {
@@ -333,6 +419,9 @@ test("MCP native voice mutation tools expose batch lifecycle and honest artifact
     },
   });
   assert.equal((staged.structuredContent as { handle?: string }).handle, handle);
+  assert.match(textFrom(staged), new RegExp(`handle: ${handle}`));
+  assert.match(textFrom(staged), new RegExp(`digest: ${digest}`));
+  assert.match(textFrom(staged), /ymm4_native_voice_mutation_commit/);
   await client.callTool({
     name: "ymm4_native_voice_mutation_commit",
     arguments: { handle, digest },
@@ -481,6 +570,10 @@ test("MCP scene inspection requires explicit approval, review, and human decisio
   assert.match(
     (reviewed.content as Array<{ text?: string }>)[0]?.text ?? "",
     /Inspection images/,
+  );
+  assert.doesNotMatch(
+    (reviewed.content as Array<{ text?: string }>)[0]?.text ?? "",
+    new RegExp(artifactPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   assert.equal(
     (reviewed.content as Array<{ type: string }>).filter((item) => item.type === "image")

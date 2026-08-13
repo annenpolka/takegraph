@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const workspaceRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+const portableVoiceMaterializationConcurrency = 4;
 const defaultExecutable =
   process.env.TAKEGRAPH_CORE_GUARD ??
   path.join(
@@ -62,6 +63,45 @@ interface Ymm4Snapshot {
   managedItems: unknown[];
   nativeExtensions: unknown[];
   unmanagedContextCount: number;
+}
+
+export interface Ymm4CompositionSnapshot {
+  schemaVersion: 1;
+  projectId: string;
+  sceneId: string;
+  sourceFingerprint: string;
+  fps: number;
+  frame: number;
+  viewport: {
+    availability: "available" | "unavailable";
+    width: number | null;
+    height: number | null;
+  };
+  elements: Array<{
+    elementId: string;
+    stability: "realization_identity" | "session_only";
+    kind: string;
+    frame: number;
+    layer: number;
+    length: number;
+    active: boolean;
+    selected: boolean | null;
+    text: string | null;
+    visual: {
+      availability: "available" | "unavailable";
+      x: number | null;
+      y: number | null;
+      width: number | null;
+      height: number | null;
+    };
+  }>;
+  completeness: "complete" | "partial";
+  unavailableFields: string[];
+}
+
+export interface StageProjectInitializationInput {
+  mode: "adopt_active" | "save_untitled";
+  path?: string;
 }
 
 interface StagedResult {
@@ -170,6 +210,12 @@ export interface StageYmm4Input {
   captionLayer: number;
 }
 
+export interface StageYmm4BatchInput {
+  items: StageYmm4Input[];
+}
+
+export type StageYmm4Request = StageYmm4Input | StageYmm4BatchInput;
+
 export interface StageNativeVoiceInput {
   entityId: string;
   displayText: string;
@@ -179,6 +225,14 @@ export interface StageNativeVoiceInput {
   layer: number;
   maxLength: number;
 }
+
+export interface StageNativeVoiceBatchInput {
+  items: StageNativeVoiceInput[];
+}
+
+export type StageNativeVoiceRequest =
+  | StageNativeVoiceInput
+  | StageNativeVoiceBatchInput;
 
 interface NativeVoiceMutationCommonInput {
   entityId: string;
@@ -269,6 +323,47 @@ export interface StageNativeExtensionInput {
   maxChangedEntities?: number;
 }
 
+export type TimelineEditOperationInput =
+  | ({ op: "portable_voice_create" } & StageYmm4Input)
+  | ({ op: "native_voice_create" } & StageNativeVoiceInput);
+
+export interface StageTimelineEditInput {
+  operations: TimelineEditOperationInput[];
+  maxChangedEntities?: number;
+}
+
+type PreparedTimelineEditOperation =
+  | {
+      type: "portable_voice_create";
+      utterance: {
+        entityId: string;
+        revision: number;
+        speaker: string;
+        caption: string;
+        spokenText: string;
+        audioPath: string;
+        artifactHash: string;
+        frame: number;
+        length: number;
+        audioLayer: number;
+        captionLayer: number;
+      };
+    }
+  | {
+      type: "native_voice_create";
+      cue: {
+        realizationId: string;
+        entityId: string;
+        revision: number;
+        characterName: string;
+        displayText: string;
+        spokenText: string;
+        frame: number;
+        layer: number;
+        maxLength: number;
+      };
+    };
+
 export interface ReconciliationDecisionInput {
   entryId: string;
   choice:
@@ -301,6 +396,18 @@ interface NativeExtensionDescriptorResult {
 interface NativeExtensionStagedResult {
   digest: string;
   operationId: string;
+  [key: string]: unknown;
+}
+
+interface TimelineEditStagedResult {
+  taskFile: string;
+  patchId: string;
+  digest: string;
+  baseRevision: number;
+  operationId: string;
+  project: Ymm4Snapshot;
+  planDigest: string;
+  timelineEditPlan: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -362,7 +469,37 @@ export class Ymm4Workflow {
     return { health, capabilities, snapshot };
   }
 
-  async stage(input: StageYmm4Input) {
+  async canonicalHead() {
+    return this.readHead();
+  }
+
+  async composition(): Promise<Ymm4CompositionSnapshot> {
+    const canonical = await this.readHead();
+    return (await this.runJson([
+      "ymm4",
+      "composition",
+      ...this.expectedProjectArgs(canonical),
+    ])) as Ymm4CompositionSnapshot;
+  }
+
+  private async requireNamedProject(): Promise<Ymm4Snapshot> {
+    const canonical = await this.readHead();
+    const snapshot = (await this.runJson([
+      "ymm4",
+      "snapshot",
+      ...this.expectedProjectArgs(canonical),
+    ])) as Ymm4Snapshot;
+    if ((snapshot.projectPath ?? "").trim().length === 0) {
+      throw new Error("project has no existing path; Save As is not authorized");
+    }
+    return snapshot;
+  }
+
+  async stage(input: StageYmm4Request) {
+    const items = "items" in input ? input.items : [input];
+    requireBatchItems(items, "YMM4 portable voice");
+    requireUniqueEntityIds(items, "YMM4 portable voice");
+    await this.requireNamedProject();
     await fs.mkdir(this.stateDirectory, { recursive: true });
     const canonical = await this.readHead();
     const head = canonical.revision;
@@ -371,46 +508,48 @@ export class Ymm4Workflow {
       "snapshot",
       ...this.expectedProjectArgs(canonical),
     ])) as Ymm4Snapshot;
-    const voice = (await this.runJson([
-      "voicevox",
-      "materialize",
-      "--speaker",
-      input.speaker,
-      "--style",
-      input.style,
-      "--text",
-      input.spokenText,
-      "--artifact-root",
-      this.artifactDirectory,
-    ])) as VoiceArtifactResult;
-    const length = Math.ceil(
-      (voice.artifact.wav.duration_samples * snapshot.fps) /
-        voice.artifact.wav.sample_rate,
+    const materialized = await mapWithConcurrency(
+      items,
+      portableVoiceMaterializationConcurrency,
+      async (item) => {
+        const voice = (await this.runJson([
+          "voicevox",
+          "materialize",
+          "--speaker",
+          item.speaker,
+          "--style",
+          item.style,
+          "--text",
+          item.spokenText,
+          "--artifact-root",
+          this.artifactDirectory,
+        ])) as VoiceArtifactResult;
+        const length = Math.ceil(
+          (voice.artifact.wav.duration_samples * snapshot.fps) /
+            voice.artifact.wav.sample_rate,
+        );
+        return { item, voice, length };
+      },
     );
     const handle = randomUUID();
     const manifestFile = this.resolveHandle(handle, "manifest.json");
     const patchFile = this.resolveHandle(handle, "patch.json");
+    const manifest = materialized.map(({ item, voice, length }) => ({
+      entityId: item.entityId,
+      revision: head,
+      speaker: voice.speaker,
+      caption: item.caption,
+      spokenText: item.spokenText,
+      audioPath: voice.artifact.audio_path,
+      artifactHash: voice.artifact.audio_hash,
+      frame: item.frame,
+      length,
+      audioLayer: item.audioLayer,
+      captionLayer: item.captionLayer,
+    }));
     await fs.writeFile(
       manifestFile,
-      JSON.stringify(
-        [
-          {
-            entityId: input.entityId,
-            revision: head,
-            speaker: voice.speaker,
-            caption: input.caption,
-            spokenText: input.spokenText,
-            audioPath: voice.artifact.audio_path,
-            artifactHash: voice.artifact.audio_hash,
-            frame: input.frame,
-            length,
-            audioLayer: input.audioLayer,
-            captionLayer: input.captionLayer,
-          },
-        ],
-        null,
-        2,
-      ),
+      JSON.stringify(manifest, null, 2),
       "utf8",
     );
     const staged = (await this.runJson([
@@ -434,17 +573,34 @@ export class Ymm4Workflow {
       impact: staged.plan,
       targetPlanDigest: staged.targetPlanDigest,
       targetPlan: staged.targetPlan,
-      placement: {
-        frame: input.frame,
+      itemCount: materialized.length,
+      placements: materialized.map(({ item, length }) => ({
+        entityId: item.entityId,
+        frame: item.frame,
         length,
-        audioLayer: input.audioLayer,
-        captionLayer: input.captionLayer,
-      },
-      voice,
+        audioLayer: item.audioLayer,
+        captionLayer: item.captionLayer,
+      })),
+      voices: materialized.map(({ item, voice }) => ({
+        entityId: item.entityId,
+        ...voice,
+      })),
+      ...(materialized.length === 1
+        ? {
+            placement: {
+              frame: materialized[0]!.item.frame,
+              length: materialized[0]!.length,
+              audioLayer: materialized[0]!.item.audioLayer,
+              captionLayer: materialized[0]!.item.captionLayer,
+            },
+            voice: materialized[0]!.voice,
+          }
+        : {}),
     };
   }
 
   async commit(handle: string, digest: string) {
+    await this.requireNamedProject();
     const patchFile = this.resolveHandle(handle, "patch.json");
     const taskBase = await this.readTaskBase(patchFile);
     const canonical = await this.readHead();
@@ -481,42 +637,43 @@ export class Ymm4Workflow {
     ]);
   }
 
-  async stageNativeVoice(input: StageNativeVoiceInput) {
-    if (input.displayText !== input.spokenText) {
-      throw new Error(
-        "displayText and spokenText must be identical for the current YMM4 native voice slice",
-      );
+  async stageNativeVoice(input: StageNativeVoiceRequest) {
+    const items = "items" in input ? input.items : [input];
+    requireBatchItems(items, "YMM4 native voice");
+    requireUniqueEntityIds(items, "YMM4 native voice");
+    for (const item of items) {
+      if (item.displayText !== item.spokenText) {
+        throw new Error(
+          "displayText and spokenText must be identical for the current YMM4 native voice slice",
+        );
+      }
     }
+    await this.requireNamedProject();
 
     await fs.mkdir(this.stateDirectory, { recursive: true });
     const canonical = await this.readHead();
     const head = canonical.revision;
     const handle = randomUUID();
-    const realizationId = randomUUID();
+    const realizationIds = items.map(() => randomUUID());
     const manifestFile = this.resolveHandle(
       handle,
       "native-voice.manifest.json",
     );
     const patchFile = this.resolveHandle(handle, "native-voice.patch.json");
+    const manifest = items.map((item, index) => ({
+      realizationId: realizationIds[index]!,
+      entityId: item.entityId,
+      revision: head,
+      characterName: item.characterName,
+      displayText: item.displayText,
+      spokenText: item.spokenText,
+      frame: item.frame,
+      layer: item.layer,
+      maxLength: item.maxLength,
+    }));
     await fs.writeFile(
       manifestFile,
-      JSON.stringify(
-        [
-          {
-            realizationId,
-            entityId: input.entityId,
-            revision: head,
-            characterName: input.characterName,
-            displayText: input.displayText,
-            spokenText: input.spokenText,
-            frame: input.frame,
-            layer: input.layer,
-            maxLength: input.maxLength,
-          },
-        ],
-        null,
-        2,
-      ),
+      JSON.stringify(manifest, null, 2),
       "utf8",
     );
     const staged = (await this.runJson([
@@ -534,22 +691,36 @@ export class Ymm4Workflow {
     ])) as NativeVoiceStagedResult;
     return {
       handle,
-      realizationId,
+      realizationIds,
       digest: staged.digest,
       baseRevision: head,
       project: staged.project,
       impact: staged.plan,
       targetPlanDigest: staged.targetPlanDigest,
       targetPlan: staged.targetPlan,
-      placement: {
-        frame: input.frame,
-        layer: input.layer,
-        maxLength: input.maxLength,
-      },
+      itemCount: items.length,
+      placements: items.map((item, index) => ({
+        realizationId: realizationIds[index]!,
+        entityId: item.entityId,
+        frame: item.frame,
+        layer: item.layer,
+        maxLength: item.maxLength,
+      })),
+      ...(items.length === 1
+        ? {
+            realizationId: realizationIds[0]!,
+            placement: {
+              frame: items[0]!.frame,
+              layer: items[0]!.layer,
+              maxLength: items[0]!.maxLength,
+            },
+          }
+        : {}),
     };
   }
 
   async commitNativeVoice(handle: string, digest: string) {
+    await this.requireNamedProject();
     const patchFile = this.resolveHandle(handle, "native-voice.patch.json");
     const taskBase = await this.readTaskBase(patchFile);
     const canonical = await this.readHead();
@@ -586,7 +757,244 @@ export class Ymm4Workflow {
     ]);
   }
 
+  async stageTimelineEdit(input: StageTimelineEditInput) {
+    requireBatchItems(input.operations, "YMM4 timeline edit");
+    requireUniqueEntityIds(input.operations, "YMM4 timeline edit");
+    if (
+      input.maxChangedEntities !== undefined &&
+      (!Number.isSafeInteger(input.maxChangedEntities) ||
+        input.maxChangedEntities < input.operations.length ||
+        input.maxChangedEntities > 128)
+    ) {
+      throw new Error(
+        "YMM4 timeline edit maxChangedEntities must cover every operation",
+      );
+    }
+    for (const operation of input.operations) {
+      if (
+        operation.op === "native_voice_create" &&
+        operation.displayText !== operation.spokenText
+      ) {
+        throw new Error(
+          "displayText and spokenText must be identical for a YMM4 native voice create",
+        );
+      }
+    }
+
+    const snapshot = await this.requireNamedProject();
+    await fs.mkdir(this.stateDirectory, { recursive: true });
+    const canonical = await this.readHead();
+    const head = canonical.revision;
+    try {
+      const portableInputs = input.operations
+        .map((operation, index) => ({ operation, index }))
+        .filter(
+          (entry): entry is {
+            operation: Extract<
+              TimelineEditOperationInput,
+              { op: "portable_voice_create" }
+            >;
+            index: number;
+          } => entry.operation.op === "portable_voice_create",
+        );
+      const portableResults = await mapWithConcurrency(
+        portableInputs,
+        portableVoiceMaterializationConcurrency,
+        async ({ operation, index }) => {
+          const voice = (await this.runJson([
+            "voicevox",
+            "materialize",
+            "--speaker",
+            operation.speaker,
+            "--style",
+            operation.style,
+            "--text",
+            operation.spokenText,
+            "--artifact-root",
+            this.artifactDirectory,
+          ])) as VoiceArtifactResult;
+          const length = Math.ceil(
+            (voice.artifact.wav.duration_samples * snapshot.fps) /
+              voice.artifact.wav.sample_rate,
+          );
+          return { index, voice, length };
+        },
+      );
+      const portableByIndex = new Map(
+        portableResults.map((result) => [result.index, result] as const),
+      );
+      const prepared = input.operations.map(
+        (operation, index): PreparedTimelineEditOperation => {
+          if (operation.op === "native_voice_create") {
+            return {
+              type: "native_voice_create",
+              cue: {
+                realizationId: randomUUID(),
+                entityId: operation.entityId,
+                revision: head,
+                characterName: operation.characterName,
+                displayText: operation.displayText,
+                spokenText: operation.spokenText,
+                frame: operation.frame,
+                layer: operation.layer,
+                maxLength: operation.maxLength,
+              },
+            };
+          }
+          const materialized = portableByIndex.get(index);
+          if (!materialized) {
+            throw new Error("A prepared portable voice result was missing");
+          }
+          return {
+            type: "portable_voice_create",
+            utterance: {
+              entityId: operation.entityId,
+              revision: head,
+              speaker: materialized.voice.speaker,
+              caption: operation.caption,
+              spokenText: operation.spokenText,
+              audioPath: materialized.voice.artifact.audio_path,
+              artifactHash: materialized.voice.artifact.audio_hash,
+              frame: operation.frame,
+              length: materialized.length,
+              audioLayer: operation.audioLayer,
+              captionLayer: operation.captionLayer,
+            },
+          };
+        },
+      );
+      const handle = randomUUID();
+      const manifestFile = this.resolveHandle(
+        handle,
+        "timeline-edit.manifest.json",
+      );
+      const taskFile = this.resolveHandle(handle, "timeline-edit.task.json");
+      await fs.writeFile(
+        manifestFile,
+        JSON.stringify(
+          buildTimelineEditManifest(
+            prepared,
+            input.maxChangedEntities ?? prepared.length,
+          ),
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      const result = (await this.runJson([
+        "ymm4",
+        "timeline-edit-stage",
+        "--state-root",
+        this.projectStateRoot,
+        "--manifest",
+        manifestFile,
+        "--task",
+        taskFile,
+        "--head",
+        String(head),
+        ...this.expectedProjectArgs(canonical),
+      ])) as TimelineEditStagedResult;
+      return {
+        ...result,
+        handle,
+        operationCount: prepared.length,
+        operationKinds: prepared.map((operation) => operation.type),
+        placements: prepared.map((operation) =>
+          operation.type === "portable_voice_create"
+            ? {
+                entityId: operation.utterance.entityId,
+                frame: operation.utterance.frame,
+                length: operation.utterance.length,
+                primaryLayer: operation.utterance.audioLayer,
+                secondaryLayer: operation.utterance.captionLayer,
+              }
+            : {
+                entityId: operation.cue.entityId,
+                realizationId: operation.cue.realizationId,
+                frame: operation.cue.frame,
+                maxLength: operation.cue.maxLength,
+                primaryLayer: operation.cue.layer,
+                secondaryLayer: null,
+              },
+        ),
+      };
+    } catch {
+      // Provider and CLI process errors can echo complete host-local paths in
+      // their command lines. Keep those paths inside this owning adapter.
+      throw new Error(
+        "Timeline edit staging failed during bounded preparation or aggregate plan sealing; YMM4 was not changed",
+      );
+    }
+  }
+
+  async commitTimelineEdit(handle: string, digest: string) {
+    const taskFile = this.resolveHandle(handle, "timeline-edit.task.json");
+    try {
+      await this.requireNamedProject();
+      const taskBase = await this.readTaskBase(taskFile);
+      const canonical = await this.readHead();
+      const head = canonical.revision;
+      const result = await this.runJson([
+        "ymm4",
+        "timeline-edit-commit",
+        "--state-root",
+        this.projectStateRoot,
+        "--task",
+        taskFile,
+        "--digest",
+        digest,
+        "--head",
+        String(head),
+        ...this.expectedProjectArgs(canonical),
+      ]);
+      this.validateCanonicalMutationResult(
+        result,
+        taskBase,
+        head,
+        "YMM4 timeline edit",
+      );
+      return result;
+    } catch {
+      throw new Error(
+        "Timeline edit execution did not complete synchronously. Its outcome may be unknown; revalidate the same opaque taskId before any retry",
+      );
+    }
+  }
+
+  async verifyTimelineEdit(handle: string) {
+    const taskFile = this.resolveHandle(handle, "timeline-edit.task.json");
+    try {
+      return await this.runJson([
+        "ymm4",
+        "timeline-edit-verify",
+        "--task",
+        taskFile,
+      ]);
+    } catch {
+      throw new Error(
+        "Timeline edit semantic verification failed without exposing host diagnostics; check YMM4 availability. Durable task status remains recoverable with the same opaque taskId",
+      );
+    }
+  }
+
+  async timelineEditStatus(handle: string) {
+    const taskFile = this.resolveHandle(handle, "timeline-edit.task.json");
+    try {
+      return await this.runJson([
+        "ymm4",
+        "timeline-edit-status",
+        "--task",
+        taskFile,
+      ]);
+    } catch {
+      throw new Error(
+        "Timeline edit status could not be recovered without exposing host diagnostics; keep the same opaque taskId and check the local TakeGraph task store",
+      );
+    }
+  }
+
   async stageNativeVoiceMutations(input: StageNativeVoiceMutationsInput) {
+    await this.requireNamedProject();
     if (input.mutations.length < 1 || input.mutations.length > 128) {
       throw new Error("YMM4 native voice mutation requires 1-128 operations");
     }
@@ -667,6 +1075,7 @@ export class Ymm4Workflow {
   }
 
   async commitNativeVoiceMutations(handle: string, digest: string) {
+    await this.requireNamedProject();
     const patchFile = this.resolveHandle(handle, "native-voice-mutation.patch.json");
     const taskBase = await this.readTaskBase(patchFile);
     const canonical = await this.readHead();
@@ -723,6 +1132,7 @@ export class Ymm4Workflow {
   }
 
   async stageNativeExtension(input: StageNativeExtensionInput) {
+    await this.requireNamedProject();
     if (input.operations.length === 0) {
       throw new Error("At least one native-extension operation is required");
     }
@@ -888,6 +1298,7 @@ export class Ymm4Workflow {
   }
 
   async applyNativeExtension(handle: string) {
+    await this.requireNamedProject();
     const taskFile = this.resolveHandle(handle, "native-extension.task.json");
     const taskBase = await this.readTaskBase(taskFile);
     const canonical = await this.readHead();
@@ -1039,7 +1450,81 @@ export class Ymm4Workflow {
     return this.runJson(["ymm4", "save"]);
   }
 
+  async stageProjectInitialization(input: StageProjectInitializationInput) {
+    if (input.mode === "adopt_active" && input.path !== undefined) {
+      throw new Error("adopt_active does not accept a destination path");
+    }
+    if (input.mode === "save_untitled") {
+      if (!input.path || !path.isAbsolute(input.path) || path.extname(input.path).toLowerCase() !== ".ymmp") {
+        throw new Error("save_untitled requires an absolute .ymmp destination path");
+      }
+    }
+    try {
+      return projectInitializationPublicResult(await this.runJson([
+        "ymm4",
+        "project-initialization-stage",
+        ...this.projectStoreArgs(),
+        "--mode",
+        input.mode,
+        ...(input.path ? ["--destination", input.path] : []),
+      ]));
+    } catch {
+      // execFile errors can echo their complete argument list. The selected
+      // host path is stage-only input and must never cross the model boundary.
+      throw new Error(
+        "Project initialization staging failed without exposing the selected path. Check that YMM4 has an active project in the requested saved/untitled state, and that a Save As destination is a new absolute .ymmp path with an existing parent directory.",
+      );
+    }
+  }
+
+  async approveProjectInitialization(taskId: string, planDigest: string) {
+    requireUuid(taskId, "project initialization taskId");
+    const digest = normalizeSha256(planDigest);
+    return projectInitializationPublicResult(await this.runJson([
+      "ymm4",
+      "project-initialization-approve",
+      "--operation-root",
+      this.projectOperationRoot,
+      "--operation-id",
+      taskId,
+      "--digest",
+      digest,
+    ]));
+  }
+
+  async executeProjectInitialization(taskId: string) {
+    requireUuid(taskId, "project initialization taskId");
+    try {
+      return projectInitializationPublicResult(await this.runJson([
+        "ymm4",
+        "project-initialization-execute",
+        ...this.projectStoreArgs(),
+        "--operation-id",
+        taskId,
+      ]));
+    } catch {
+      // Bridge and process errors may contain host-local destination/temp
+      // paths. The durable task status is the safe recovery authority.
+      throw new Error(
+        "Project initialization execution did not complete synchronously. Its outcome may be unknown; inspect the same taskId, then use execute intent=run only when availableActions permits an exact retry.",
+      );
+    }
+  }
+
+  async projectInitializationStatus(taskId: string) {
+    requireUuid(taskId, "project initialization taskId");
+    return projectInitializationPublicResult(await this.runJson([
+      "ymm4",
+      "project-initialization-status",
+      "--operation-root",
+      this.projectOperationRoot,
+      "--operation-id",
+      taskId,
+    ]));
+  }
+
   async stageCheckpoint() {
+    await this.requireNamedProject();
     const canonical = await this.readHead();
     const head = canonical.revision;
     return this.runJson([
@@ -1053,6 +1538,7 @@ export class Ymm4Workflow {
   }
 
   async executeCheckpoint(operationId: string) {
+    await this.requireNamedProject();
     requireUuid(operationId, "checkpoint operationId");
     const canonical = await this.readHead();
     const head = canonical.revision;
@@ -1245,6 +1731,7 @@ export class Ymm4Workflow {
   }
 
   async executeReconciliationDetach(childTaskId: string) {
+    await this.requireNamedProject();
     const canonical = await this.readHead();
     const head = canonical.revision;
     return this.runJson([
@@ -1263,6 +1750,7 @@ export class Ymm4Workflow {
     childTaskId: string,
     manifest: Record<string, unknown>,
   ) {
+    await this.requireNamedProject();
     await fs.mkdir(this.stateDirectory, { recursive: true });
     const canonical = await this.readHead();
     const head = canonical.revision;
@@ -1362,6 +1850,11 @@ export class Ymm4Workflow {
       !Number.isSafeInteger(result.revision) ||
       result.revision < 0
     ) {
+      if (result.revision === null) {
+        throw new Error(
+          "canonical project is not initialized; stage and approve project_initialization first",
+        );
+      }
       throw new Error("YMM4 canonical-head returned an invalid revision");
     }
     return { projectId: result.projectId, revision: result.revision };
@@ -1531,6 +2024,121 @@ function normalizeSha256(value: string): string {
   return `sha256:${normalizeRawSha256(value)}`;
 }
 
+function projectInitializationPublicResult(value: unknown): Record<string, unknown> {
+  const record = value as {
+    payload?: {
+      plan?: {
+        operationId?: unknown;
+        mode?: unknown;
+        source?: {
+          projectId?: unknown;
+          sceneId?: unknown;
+          fingerprint?: unknown;
+          projectPathDigest?: unknown;
+        };
+        destination?: {
+          projectId?: unknown;
+          pathDigest?: unknown;
+          fileName?: unknown;
+        } | null;
+        canonicalRevision?: unknown;
+        canonicalPreexisting?: unknown;
+        planDigest?: unknown;
+      };
+      approvedPlanDigest?: unknown;
+      status?: unknown;
+      resultProjectId?: unknown;
+      resultSceneId?: unknown;
+      canonicalRevision?: unknown;
+      canonicalCreated?: unknown;
+      executionReplayed?: unknown;
+      error?: unknown;
+    };
+  };
+  const payload = record.payload;
+  const plan = payload?.plan;
+  const source = plan?.source;
+  if (
+    !payload ||
+    !plan ||
+    !source ||
+    typeof plan.operationId !== "string" ||
+    typeof plan.mode !== "string" ||
+    typeof plan.planDigest !== "string" ||
+    typeof payload.status !== "string" ||
+    typeof source.projectId !== "string" ||
+    typeof source.sceneId !== "string" ||
+    typeof source.fingerprint !== "string" ||
+    typeof plan.canonicalRevision !== "number" ||
+    typeof plan.canonicalPreexisting !== "boolean"
+  ) {
+    throw new Error("Project initialization returned an invalid durable task");
+  }
+  const result: Record<string, unknown> = {
+    operationId: plan.operationId,
+    status: payload.status,
+    mode: plan.mode,
+    planDigest: normalizeSha256(plan.planDigest),
+    approvedPlanDigest:
+      typeof payload.approvedPlanDigest === "string"
+        ? normalizeSha256(payload.approvedPlanDigest)
+        : null,
+    source: {
+      projectId: source.projectId,
+      sceneId: source.sceneId,
+      fingerprint: normalizeSha256(source.fingerprint),
+      projectPathPresent: typeof source.projectPathDigest === "string",
+      canonicalRevision: plan.canonicalRevision,
+      canonicalPreexisting: plan.canonicalPreexisting,
+    },
+    destination:
+      plan.destination &&
+      typeof plan.destination.projectId === "string" &&
+      typeof plan.destination.pathDigest === "string" &&
+      typeof plan.destination.fileName === "string"
+        ? {
+            projectId: plan.destination.projectId,
+            pathDigest: normalizeSha256(plan.destination.pathDigest),
+            fileName: plan.destination.fileName,
+          }
+        : null,
+    result:
+      typeof payload.resultProjectId === "string" &&
+      typeof payload.resultSceneId === "string" &&
+      typeof payload.canonicalRevision === "number" &&
+      typeof payload.canonicalCreated === "boolean"
+        ? {
+            projectId: payload.resultProjectId,
+            sceneId: payload.resultSceneId,
+            canonicalRevision: payload.canonicalRevision,
+            canonicalCreated: payload.canonicalCreated,
+          }
+        : null,
+    executionReplayed: payload.executionReplayed === true,
+    failureKind:
+      typeof payload.error === "string" && payload.error.length > 0
+        ? initializationFailureKind(payload.status)
+        : null,
+  };
+  return result;
+}
+
+function initializationFailureKind(status: unknown): string {
+  switch (status) {
+    case "recovery_required":
+      return "exact-retry-required";
+    case "stale":
+      return "source-binding-stale";
+    case "conflicted":
+    case "already_initialized":
+      return "canonical-initialization-conflict";
+    case "failed":
+      return "initialization-failed";
+    default:
+      return "initialization-blocked";
+  }
+}
+
 function requireUuid(value: string, field: string): void {
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -1539,4 +2147,65 @@ function requireUuid(value: string, field: string): void {
   ) {
     throw new Error(`Invalid YMM4 ${field}`);
   }
+}
+
+function requireBatchItems<T>(items: T[], label: string): void {
+  if (items.length < 1 || items.length > 128) {
+    throw new Error(`${label} requires 1-128 items`);
+  }
+}
+
+function requireUniqueEntityIds(
+  items: Array<{ entityId: string }>,
+  label: string,
+): void {
+  if (new Set(items.map((item) => item.entityId)).size !== items.length) {
+    throw new Error(`${label} entityIds must be unique within one task`);
+  }
+}
+
+function buildTimelineEditManifest(
+  operations: PreparedTimelineEditOperation[],
+  maxChangedEntities: number,
+) {
+  return {
+    operations,
+    maxChangedEntities,
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  let failed = false;
+  let firstError: unknown;
+  const worker = async () => {
+    for (;;) {
+      if (failed) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = await mapper(items[index]!, index);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+        return;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, items.length) },
+      () => worker(),
+    ),
+  );
+  if (failed) throw firstError;
+  return results;
 }

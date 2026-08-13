@@ -1,4 +1,18 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project>
+  <!--
+    Contract-stub builds must never replace the real-contract DLL consumed by
+    the installer. These properties must be set before Sdk.props imports
+    Microsoft.Common.props so NuGet and every generated intermediate are also
+    isolated from the production build graph.
+  -->
+  <PropertyGroup Condition="'$(UseYmm4ContractStub)' == 'true'">
+    <BaseOutputPath>bin\contract-stub\</BaseOutputPath>
+    <BaseIntermediateOutputPath>obj\contract-stub\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
@@ -31,4 +45,6 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
 </Project>

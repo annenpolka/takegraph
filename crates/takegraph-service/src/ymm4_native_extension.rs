@@ -147,6 +147,7 @@ impl Ymm4NativeExtensionTask {
         let structured = StructuredYmm4Capabilities::from_bridge(&health, &raw_capabilities)
             .map_err(|error| Ymm4NativeExtensionError::Capability(error.to_string()))?;
         let target = client.snapshot().await?;
+        crate::require_existing_project_path(&target.project_path)?;
         let descriptor_catalog = client.native_descriptors().await?;
         descriptor_catalog.validate()?;
         validate_catalog_target(&descriptor_catalog, &target)?;
@@ -284,6 +285,8 @@ impl Ymm4NativeExtensionTask {
         current_head: RevisionId,
     ) -> Result<crate::DurableExternalMutationOutcome, Ymm4NativeExtensionError> {
         self.validate_payload()?;
+        crate::require_existing_project_path(&self.target.project_path)?;
+        crate::require_existing_project_path(&client.snapshot().await?.project_path)?;
         crate::external_mutation::authorize_external_patch(&self.patch)?;
         let request = self.apply_request()?;
         let target = VerifiedTargetBinding {
@@ -1345,6 +1348,8 @@ pub enum Ymm4NativeExtensionError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Canonical(#[from] takegraph_core::CanonicalError),
+    #[error(transparent)]
+    UnsavedProject(#[from] crate::UnsavedProjectError),
     #[error("invalid native-extension payload: {0}")]
     InvalidPayload(String),
     #[error("native-extension approval does not match the staged digest")]

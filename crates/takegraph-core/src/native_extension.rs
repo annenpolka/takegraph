@@ -703,8 +703,7 @@ impl NativeExtensionPlan {
         let mut keys = BTreeSet::new();
         let mut realizations = BTreeSet::new();
         for operation in &self.operations {
-            operation.intent.validate()?;
-            operation.preservation.validate()?;
+            validate_planned_native_extension(operation)?;
             let key = operation.intent.logical_key();
             if !keys.insert(key.clone()) {
                 return Err(NativeExtensionError::DuplicateOperation(key));
@@ -714,28 +713,48 @@ impl NativeExtensionPlan {
                     operation.realization_id,
                 ));
             }
-            if operation.capability_dependencies.is_empty() {
-                return Err(NativeExtensionError::MissingCapabilityDependency(key));
-            }
-            for dependency in &operation.capability_dependencies {
-                require_non_empty(&dependency.feature, "capability feature")?;
-                if dependency.minimum_version == 0 {
-                    return Err(NativeExtensionError::InvalidCapabilityDependency(
-                        dependency.feature.clone(),
-                    ));
-                }
-                let schema_digest = dependency.schema_digest.as_ref().ok_or_else(|| {
-                    NativeExtensionError::InvalidCapabilityDependency(dependency.feature.clone())
-                })?;
-                require_sha256(schema_digest, "capability schema digest")?;
-            }
-            for dependency in &operation.descriptor_dependencies {
-                require_non_empty(&dependency.descriptor_id, "descriptor dependency id")?;
-                require_sha256(&dependency.digest, "descriptor dependency digest")?;
-            }
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_planned_native_extension(
+    operation: &PlannedNativeExtension,
+) -> Result<(), NativeExtensionError> {
+    operation.intent.validate()?;
+    operation.preservation.validate()?;
+    let key = operation.intent.logical_key();
+    if operation.capability_dependencies.is_empty() {
+        return Err(NativeExtensionError::MissingCapabilityDependency(key));
+    }
+    let mut capabilities = BTreeSet::new();
+    for dependency in &operation.capability_dependencies {
+        require_non_empty(&dependency.feature, "capability feature")?;
+        if dependency.minimum_version == 0 || !capabilities.insert(dependency.feature.as_str()) {
+            return Err(NativeExtensionError::InvalidCapabilityDependency(
+                dependency.feature.clone(),
+            ));
+        }
+        let schema_digest = dependency.schema_digest.as_ref().ok_or_else(|| {
+            NativeExtensionError::InvalidCapabilityDependency(dependency.feature.clone())
+        })?;
+        require_sha256(schema_digest, "capability schema digest")?;
+    }
+    let mut descriptors = BTreeSet::new();
+    for dependency in &operation.descriptor_dependencies {
+        require_non_empty(&dependency.descriptor_id, "descriptor dependency id")?;
+        require_sha256(&dependency.digest, "descriptor dependency digest")?;
+        if !descriptors.insert(format!(
+            "{:?}:{}",
+            dependency.kind, dependency.descriptor_id
+        )) {
+            return Err(NativeExtensionError::DuplicateOperation(format!(
+                "descriptor:{}",
+                dependency.descriptor_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn require_duration(value: u32) -> Result<(), NativeExtensionError> {

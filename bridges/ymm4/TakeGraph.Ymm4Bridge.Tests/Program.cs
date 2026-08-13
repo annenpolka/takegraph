@@ -23,6 +23,11 @@ var tests = new (string Name, Action Run)[]
     ("foreign unresolved recovery blocks authorization", ForeignRecoveryBlocksAuthorization),
     ("project saved signals fail closed", ProjectSavedSignalsFailClosed),
     ("project operation store persistence", ProjectOperationStorePersistence),
+    ("project initialization store is request-bound", ProjectInitializationStoreIsRequestBound),
+    ("project initialization path claim never overwrites", ProjectInitializationPathClaimNeverOverwrites),
+    ("project initialization path claim is evidence-bound", ProjectInitializationPathClaimIsEvidenceBound),
+    ("project initialization recovery evidence is monotonic", ProjectInitializationRecoveryEvidenceIsMonotonic),
+    ("project initialization verified replay is historical", ProjectInitializationVerifiedReplayIsHistorical),
     ("corrupt project operation store fails closed", CorruptProjectOperationStoreFailsClosed),
     ("MP4 media probe", Mp4MediaProbeReadsAuthoritativeFields),
     ("MP4 codec evidence fails closed", Mp4CodecEvidenceFailsClosed),
@@ -43,10 +48,13 @@ var tests = new (string Name, Action Run)[]
     ("portable descriptor digests bind exact configuration", PortableDescriptorDigestsBindConfiguration),
     ("native-extension item witness rejects collateral additions", NativeExtensionItemWitnessRejectsCollateralAdditions),
     ("snapshot native-extension DTO is managed-only", SnapshotNativeExtensionDtoIsManagedOnly),
+    ("current scene composition wire contract is deterministic", CurrentSceneCompositionWireContractIsDeterministic),
+    ("current scene composition never estimates the playhead", CurrentSceneCompositionNeverEstimatesPlayhead),
     ("metadata detach WAL is durable and request-bound", MetadataDetachWalIsDurableAndBound),
     ("metadata detach not-started tombstone is durable", MetadataDetachNotStartedIsDurable),
     ("metadata detach removes only the selected Remark identity", MetadataDetachRemovesSelectedRemarkIdentity),
     ("unified target-plan cue is sealed", UnifiedTargetPlanCueIsSealed),
+    ("timeline-edit historical binding is live-state independent", TimelineEditHistoricalBindingIsLiveStateIndependent),
     ("unified portable actions bind current pair state", UnifiedPortableActionsBindCurrentPairState),
     ("portable audio is leased from immutable CAS", PortableAudioIsLeasedFromImmutableCas),
 };
@@ -173,6 +181,171 @@ static void SnapshotNativeExtensionDtoIsManagedOnly()
         "snapshot exposed preservation or unknown-effect evidence as managed state");
 }
 
+static void CurrentSceneCompositionWireContractIsDeterministic()
+{
+    const string projectId = "project-a";
+    var voiceId = Guid.Parse("11111111-2222-4333-8444-555555555555");
+    var voiceRemark = RemarkCodec.Append(
+        null,
+        new NativeVoiceMarker("takegraph/v2", projectId, "voice-a", voiceId, 3));
+    var portableText = MarkerCodec.Append(
+        "visible caption",
+        new ManagedMarker("caption-a", 2, Sha256("artifact"), "speaker", "audio.wav", 8));
+    var items = new Ymm4Facade.RawItem[]
+    {
+        new(
+            new object(),
+            10,
+            5,
+            20,
+            0,
+            "spoken text",
+            string.Empty,
+            voiceRemark,
+            "speaker",
+            "spoken text",
+            "YukkuriMovieMaker.Project.Items.VoiceItem",
+            true,
+            true),
+        new(
+            new object(),
+            0,
+            1,
+            40,
+            0,
+            "private unmanaged label",
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            "YukkuriMovieMaker.Project.Items.ImageItem",
+            false,
+            false),
+        new(
+            new object(),
+            5,
+            3,
+            30,
+            0,
+            portableText,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            "YukkuriMovieMaker.Project.Items.TextItem",
+            false,
+            true),
+        new(
+            new object(),
+            50,
+            0,
+            10,
+            0,
+            "not active",
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            "YukkuriMovieMaker.Project.Items.TextItem",
+            false,
+            true),
+    };
+    var snapshot = Ymm4Facade.BuildSceneCompositionSnapshot(
+        projectId,
+        "scene-a",
+        Sha256("source"),
+        60,
+        15,
+        items);
+
+    Assert(BridgeHost.CurrentCompositionPath == "/v2/scene/composition/current",
+        "current composition route changed unexpectedly");
+    Assert(snapshot.SchemaVersion == 1 && snapshot.Frame == 15 && snapshot.Fps == 60,
+        "current frame identity was not preserved");
+    Assert(snapshot.Elements.Count == 3
+        && snapshot.Elements.Select(value => value.Layer).SequenceEqual([1, 3, 5]),
+        "inactive items were not excluded or element ordering is unstable");
+    Assert(snapshot.Elements.All(value => value.Active),
+        "current-frame snapshot exposed a non-active element");
+    Assert(snapshot.Elements.Select(value => value.ElementId).Distinct(StringComparer.Ordinal).Count()
+        == snapshot.Elements.Count, "composition element IDs are not unique");
+    Assert(snapshot.Elements.All(value => value.ElementId.All(character => character is >= ' ' and <= '~')),
+        "composition element IDs must remain printable ASCII for cross-runtime ordering");
+    var voice = snapshot.Elements.Single(value => value.Kind == "voice");
+    Assert(voice.ElementId == $"realization:{voiceId:N}:part:0"
+        && voice.Stability == "realization_identity"
+        && voice.Selected == true, "native voice realization or selection was not observed");
+    var caption = snapshot.Elements.Single(value => value.Kind == "caption");
+    Assert(caption.Text == "visible caption" && caption.Stability == "session_only",
+        "portable marker was exposed as text or overstated as realization identity");
+    Assert(snapshot.Elements.Single(value => value.Kind == "image").Selected is null,
+        "unavailable selection must be null rather than falsely reported as unselected");
+    Assert(snapshot.Elements.Single(value => value.Kind == "image").Text is null,
+        "unmanaged item text must remain opaque to the model-facing observer");
+    Assert(snapshot.Viewport == new SceneCompositionViewportDto("unavailable", null, null)
+        && snapshot.Elements.All(value => value.Visual
+            == new SceneCompositionVisualDto("unavailable", null, null, null, null)),
+        "unreflected geometry must be explicitly unavailable");
+    Assert(snapshot.Completeness == "partial"
+        && snapshot.UnavailableFields.SequenceEqual(
+            [
+                "elements[].anchor",
+                "elements[].crop",
+                "elements[].maskAndParentRelations",
+                "elements[].opacity",
+                "elements[].paintOrder",
+                "elements[].rotation",
+                "elements[].scale",
+                "elements[].selected",
+                "elements[].text",
+                "elements[].visibility",
+                "elements[].visual",
+                "viewport",
+            ]),
+        "composition completeness does not explain unavailable fields deterministically");
+
+    var selectionChanged = Ymm4Facade.BuildSceneCompositionSnapshot(
+        projectId,
+        "scene-a",
+        Sha256("source"),
+        60,
+        15,
+        items.Select(item => item with { Selected = !item.Selected }).ToArray());
+    Assert(snapshot.Elements.Select(value => value.ElementId).SequenceEqual(
+            selectionChanged.Elements.Select(value => value.ElementId)),
+        "selection-only changes must not replace session element identities");
+
+    var json = JsonSerializer.Serialize(snapshot, BridgeJson.Options);
+    using var document = JsonDocument.Parse(json);
+    var root = document.RootElement;
+    Assert(root.GetProperty("schemaVersion").GetUInt32() == 1
+        && root.GetProperty("sourceFingerprint").GetString() == Sha256("source")
+        && root.GetProperty("viewport").GetProperty("width").ValueKind == JsonValueKind.Null
+        && root.GetProperty("elements")[0].GetProperty("visual").GetProperty("x").ValueKind
+            == JsonValueKind.Null,
+        "current composition JSON wire names or unavailable placeholders changed");
+}
+
+static void CurrentSceneCompositionNeverEstimatesPlayhead()
+{
+    var exact = new ExactPreviewFrameFixture
+    {
+        CurrentFrame = 120,
+        CurrentPositionRate = 0.75,
+        StartPosition = TimeSpan.FromSeconds(1),
+    };
+    Assert(Ymm4Facade.ReadExactPreviewFrame(exact, 60) == 120,
+        "directly exposed current frame was not observed");
+
+    var estimatedOnly = new EstimatedPreviewFrameFixture
+    {
+        CurrentPositionRate = 0.75,
+        StartPosition = TimeSpan.FromSeconds(1),
+    };
+    Assert(Ymm4Facade.ReadExactPreviewFrame(estimatedOnly, 60) is null,
+        "composition observer estimated a playhead from progress or start position");
+}
+
 static void PortableMarkerRoundTrip()
 {
     var marker = new ManagedMarker(
@@ -199,10 +372,12 @@ static void StructuredCapabilityDigestGolden()
         "managed_audio",
         "managed_caption",
         "unified_target_plan",
+        "timeline_edit_managed_cue_mixed",
         "idempotent_apply",
         "undo_batch",
         "mutation_profile_ymm4_4_55_1_1",
         "project_checkpoint_verified",
+        "project_initialize_save_as_verified",
         "native_portrait_upsert",
         "native_face_upsert",
         "native_image_upsert",
@@ -220,13 +395,14 @@ static void StructuredCapabilityDigestGolden()
         "scene_capture_native_png",
         "scene_capture_playhead_restore",
         "scene_capture_content_hash",
+        "scene_composition_current",
         "metadata_remark_detach",
     };
     var actual = Ymm4Facade.ComputeStructuredCapabilityDigest(
         capabilities,
         "0.2.0",
         "4.55.1.1");
-    Assert(actual == "sha256:8996754be297a75298d9f3b9a0650ba8de7ea0053087546aa2c55a38f8493038",
+    Assert(actual == "sha256:d5e733421b19ff855abed7bc9a7bd08c13543411ae8245835c24d17d14465a96",
         $"structured capability digest differs from Rust: {actual}");
 }
 
@@ -348,6 +524,23 @@ static void UnifiedTargetPlanCueIsSealed()
     {
         Ymm4Facade.ValidateTargetPlanCueContract(document.RootElement);
     }
+    var timelineNativeCue = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+    timelineNativeCue["capabilityDependencies"]!.AsArray().Add(
+        JsonSerializer.SerializeToNode(Dependency("timelineEdit.apply")));
+    var timelineNativeDuration = timelineNativeCue["duration"]!.AsObject();
+    timelineNativeDuration["max_frames"] = timelineNativeDuration["maxFrames"]!.GetValue<int>();
+    timelineNativeDuration.Remove("maxFrames");
+    var timelineNativeResolved = timelineNativeCue["resolvedRealization"]!.AsObject();
+    timelineNativeResolved["character_name"] =
+        timelineNativeResolved["characterName"]!.GetValue<string>();
+    timelineNativeResolved["character_binding_digest"] =
+        timelineNativeResolved["characterBindingDigest"]!.GetValue<string>();
+    timelineNativeResolved.Remove("characterName");
+    timelineNativeResolved.Remove("characterBindingDigest");
+    using (var document = JsonDocument.Parse(timelineNativeCue.ToJsonString()))
+    {
+        Ymm4Facade.ValidateTimelineEditCueContract(document.RootElement);
+    }
 
     var wrongPlacement = json.Replace(
         "\"primaryLayer\": 20",
@@ -432,6 +625,46 @@ static void UnifiedTargetPlanCueIsSealed()
     {
         Ymm4Facade.ValidateTargetPlanCueContract(document.RootElement);
     }
+    var timelineCue = System.Text.Json.Nodes.JsonNode.Parse(
+        JsonSerializer.Serialize(portableCue, BridgeJson.Options))!.AsObject();
+    timelineCue["capabilityDependencies"]!.AsArray().Add(
+        JsonSerializer.SerializeToNode(Dependency("timelineEdit.apply")));
+    var timelineResolved = timelineCue["resolvedRealization"]!.AsObject();
+    timelineResolved["audio_path"] = timelineResolved["audioPath"]!.GetValue<string>();
+    timelineResolved["artifact_digest"] = timelineResolved["artifactDigest"]!.GetValue<string>();
+    timelineResolved.Remove("audioPath");
+    timelineResolved.Remove("artifactDigest");
+    using (var document = JsonDocument.Parse(timelineCue.ToJsonString()))
+    {
+        Ymm4Facade.ValidateTimelineEditCueContract(document.RootElement);
+    }
+}
+
+static void TimelineEditHistoricalBindingIsLiveStateIndependent()
+{
+    using var document = JsonDocument.Parse(
+        """
+        {
+          "canonicalVersion":1,
+          "operationId":"11111111-1111-4111-8111-111111111111",
+          "baseRevision":7,
+          "target":{"adapterId":"historical-driver","projectId":"closed-project","sceneId":"old-scene","fps":60,"driverVersion":"old/old"},
+          "capabilityDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedScope":{"targetIdentityDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","managedStateDigest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","conflictScopeDigest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "changeBudget":{"maxChangedEntities":1,"maxShiftedEntities":0,"maxShiftFrames":0,"allowLockedChanges":false,"allowUnmanagedChanges":false},
+          "operations":[{"kind":"native_extension","descriptorCatalogDigest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","operation":{}}],
+          "warnings":[]
+        }
+        """);
+    var digest = CanonicalJson.Sha256("takegraph-timeline-edit-plan-v1", document.RootElement);
+    // This helper deliberately has no YMM4 snapshot/capability dependency: a
+    // verified historical receipt must replay after the active target changes.
+    Ymm4Facade.ValidateTimelineEditHistoricalBindingForTests(digest, document.RootElement);
+    ExpectBridgeValidation(
+        () => Ymm4Facade.ValidateTimelineEditHistoricalBindingForTests(
+            $"sha256:{new string('f', 64)}",
+            document.RootElement),
+        "historical timeline-edit binding accepted a different plan digest");
 }
 
 static void UnifiedPortableActionsBindCurrentPairState()
@@ -972,6 +1205,13 @@ static void RecoveryJournalPersistence()
         Assert(reloaded.ReadRecoverable().Count == 0,
             "recovery_required entry was incorrectly treated as automatically recoverable");
         Assert(!Directory.EnumerateFiles(directory, "*.tmp-*").Any(), "temporary recovery journal remained");
+
+        reloaded.Transition(unresolved.OperationId, "failed", unresolved.AfterFingerprint, unresolved.Error);
+        var acknowledged = new RecoveryJournalStore(directory).ReadAll()
+            .Single(value => value.OperationId == unresolved.OperationId);
+        Assert(acknowledged.State == "failed", "operator ack did not close recovery_required");
+        Assert(new RecoveryJournalStore(directory).ReadPending().Count == 0,
+            "acknowledged recovery_required remained pending");
     });
 }
 
@@ -1150,6 +1390,21 @@ static void RecoveryJournalInvariantsFailClosed()
         ExpectBridgeUnavailable(
             () => _ = new RecoveryJournalStore(directory).ReadAll(),
             "invalid recovery request hash was accepted");
+    });
+
+    WithTemporaryDirectory(directory =>
+    {
+        var entry = ValidRecoveryEntryForDriver(
+            Guid.NewGuid(),
+            "timeline_edit_managed_cue_mixed") with
+        {
+            EntityIds = ["utt-a", "portable-a", "unapproved-extra"],
+        };
+        var path = Path.Combine(directory, $"{entry.OperationId:N}.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(entry, BridgeJson.Options));
+        ExpectBridgeUnavailable(
+            () => _ = new RecoveryJournalStore(directory).ReadAll(),
+            "timeline-edit WAL accepted an identity outside its expected state");
     });
 }
 
@@ -1357,6 +1612,246 @@ static void ProjectOperationStorePersistence()
         Assert(!Directory.EnumerateFiles(directory, "*.tmp-*", SearchOption.AllDirectories).Any(),
             "temporary project-operation record remained");
     });
+}
+
+static void ProjectInitializationStoreIsRequestBound()
+{
+    WithTemporaryDirectory(directory =>
+    {
+        var operationId = Guid.NewGuid();
+        var receipt = ProjectInitializationReceiptForTests(operationId, directory, "request-a");
+        var store = new ProjectOperationStore(directory);
+        store.PutProjectInitialization(receipt);
+        var loaded = new ProjectOperationStore(directory);
+        Assert(loaded.TryGetProjectInitialization(operationId, out var persisted),
+            "project initialization receipt was not reloaded");
+        Assert(persisted?.RequestDigest == "request-a",
+            "project initialization binding changed");
+        try
+        {
+            store.PutProjectInitialization(receipt with { RequestDigest = "request-b" });
+            throw new InvalidOperationException(
+                "project initialization operation ID was rebound");
+        }
+        catch (BridgeConflictException)
+        {
+            // Expected: an operation ID has one immutable request binding.
+        }
+    });
+}
+
+static void ProjectInitializationPathClaimNeverOverwrites()
+{
+    WithTemporaryDirectory(directory =>
+    {
+        var temporary = Path.Combine(
+            directory,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
+        var destination = Path.Combine(directory, "destination.ymmp");
+        File.WriteAllText(temporary, "new project");
+        File.WriteAllText(destination, "racing owner");
+        var sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(temporary)));
+        var bytes = checked((ulong)new FileInfo(temporary).Length);
+        try
+        {
+            Ymm4Facade.ClaimPreparedProjectInitializationPath(
+                temporary,
+                destination,
+                sha256,
+                bytes);
+            throw new InvalidOperationException(
+                "project initialization overwrote a racing destination owner");
+        }
+        catch (IOException)
+        {
+            Assert(File.ReadAllText(destination) == "racing owner",
+                "project initialization changed a racing destination file");
+            Assert(File.ReadAllText(temporary) == "new project",
+                "failed namespace claim lost the temporary project file");
+        }
+    });
+}
+
+static void ProjectInitializationPathClaimIsEvidenceBound()
+{
+    WithTemporaryDirectory(directory =>
+    {
+        var destination = Path.Combine(directory, "destination.ymmp");
+        var mismatched = Path.Combine(
+            directory,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
+        File.WriteAllText(mismatched, "new project");
+        try
+        {
+            Ymm4Facade.ClaimPreparedProjectInitializationPath(
+                mismatched,
+                destination,
+                new string('0', 64),
+                checked((ulong)new FileInfo(mismatched).Length));
+            throw new InvalidOperationException("mismatched prepared evidence was accepted");
+        }
+        catch (InvalidDataException)
+        {
+            Assert(!File.Exists(destination), "mismatched evidence created the destination");
+            Assert(File.Exists(mismatched), "mismatched evidence consumed the temporary file");
+        }
+
+        var matching = Path.Combine(
+            directory,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
+        File.WriteAllText(matching, "exact project");
+        var sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(matching)));
+        var bytes = checked((ulong)new FileInfo(matching).Length);
+        Ymm4Facade.ClaimPreparedProjectInitializationPath(
+            matching,
+            destination,
+            sha256,
+            bytes);
+        Assert(!File.Exists(matching), "successful claim retained the temporary file");
+        Assert(Ymm4Facade.ProjectInitializationFileMatches(destination, sha256, bytes),
+            "claimed destination did not preserve the prepared evidence");
+    });
+}
+
+static void ProjectInitializationRecoveryEvidenceIsMonotonic()
+{
+    WithTemporaryDirectory(directory =>
+    {
+        var operationId = Guid.NewGuid();
+        var destination = Path.Combine(directory, "project.ymmp");
+        var temporary = Path.Combine(
+            directory,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
+        var applying = ProjectInitializationReceiptForTests(operationId, directory, "request-a");
+        var store = new ProjectOperationStore(directory);
+        store.PutProjectInitialization(applying);
+        Assert(store.ReadPendingProjectInitializations().Count == 1,
+            "applying initialization was absent from the global write gate");
+        try
+        {
+            store.PutProjectInitialization(applying with
+            {
+                PreparedTemporaryPath = temporary,
+                PreparedFileSha256 = new string('a', 64),
+                PreparedFileBytes = 42,
+            });
+            throw new InvalidOperationException("prepared evidence skipped its durable path-only stage");
+        }
+        catch (BridgeConflictException)
+        {
+            // Temp ownership must be durable before any file can be created.
+        }
+        var pathOnly = applying with { PreparedTemporaryPath = temporary };
+        store.PutProjectInitialization(pathOnly);
+        var complete = pathOnly with
+        {
+            PreparedFileSha256 = new string('a', 64),
+            PreparedFileBytes = 42,
+        };
+        store.PutProjectInitialization(complete);
+        var recovery = complete with
+        {
+            Status = "recovery_required",
+            Error = "simulated interruption",
+        };
+        store.PutProjectInitialization(recovery);
+        store.PutProjectInitialization(recovery with
+        {
+            Status = "applying",
+            Error = null,
+        });
+        var after = SourceSnapshotForProjectInitializationTests(
+            complete.PredictedProjectId,
+            complete.SourceSceneId,
+            destination,
+            complete.PredictedFingerprint);
+        var verified = complete with
+        {
+            Status = "verified",
+            AfterSnapshot = after,
+            FileSha256 = complete.PreparedFileSha256,
+            FileBytes = complete.PreparedFileBytes,
+        };
+        store.PutProjectInitialization(verified);
+        Assert(store.ReadPendingProjectInitializations().Count == 0,
+            "verified initialization remained in the write gate");
+        try
+        {
+            store.PutProjectInitialization(verified with { Status = "recovery_required", Error = "regress" });
+            throw new InvalidOperationException("verified initialization was mutated");
+        }
+        catch (BridgeConflictException)
+        {
+            // Verified receipts are immutable historical certificates.
+        }
+    });
+}
+
+static void ProjectInitializationVerifiedReplayIsHistorical()
+{
+    WithTemporaryDirectory(directory =>
+    {
+        var receipt = ProjectInitializationReceiptForTests(
+            Guid.NewGuid(),
+            directory,
+            "request-a");
+        var temporary = Path.Combine(
+            directory,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
+        var verified = receipt with
+        {
+            Status = "verified",
+            PreparedTemporaryPath = temporary,
+            PreparedFileSha256 = new string('a', 64),
+            PreparedFileBytes = 42,
+            AfterSnapshot = SourceSnapshotForProjectInitializationTests(
+                receipt.PredictedProjectId,
+                receipt.SourceSceneId,
+                receipt.DestinationPath,
+                receipt.PredictedFingerprint),
+            FileSha256 = new string('a', 64),
+            FileBytes = 42,
+        };
+        Assert(!File.Exists(receipt.DestinationPath), "test destination unexpectedly exists");
+        var replayed = Ymm4Facade.ReplayProjectInitialization(verified);
+        Assert(replayed.Status == "replayed", "historical receipt was not replayed");
+        Assert(!File.Exists(receipt.DestinationPath), "receipt replay mutated the filesystem");
+    });
+}
+
+static ProjectSnapshotDto SourceSnapshotForProjectInitializationTests(
+    string projectId,
+    string sceneId,
+    string projectPath,
+    string fingerprint) =>
+    new(projectId, "project", projectPath, sceneId, 60, fingerprint, [], [], 0);
+
+static ProjectInitializationReceiptDto ProjectInitializationReceiptForTests(
+    Guid operationId,
+    string directory,
+    string requestDigest)
+{
+    var destination = Path.Combine(directory, "project.ymmp");
+    return new ProjectInitializationReceiptDto(
+        operationId,
+        requestDigest,
+        "applying",
+        "driver-profile",
+        "instance-a",
+        "source-project",
+        "scene-a",
+        "before-fingerprint",
+        destination,
+        "path-digest",
+        "predicted-project",
+        "predicted-fingerprint",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 }
 
 static void CorruptProjectOperationStoreFailsClosed()
@@ -2126,6 +2621,30 @@ static RecoveryJournalEntryDto ValidRecoveryEntryForDriver(
             Driver = driver,
             ExpectedItems = [],
             PreservedStateDigests = new Dictionary<Guid, string>(),
+        },
+        "timeline_edit_managed_cue_mixed" => entry with
+        {
+            Driver = driver,
+            EntityIds = ["utt-a", "portable-a"],
+            BeforeItems = [],
+            ExpectedItems =
+            [
+                entry.ExpectedItems[0],
+                entry.ExpectedItems[0] with
+                {
+                    EntityId = "portable-a",
+                    Kind = "audio",
+                    ArtifactHash = Sha256("portable-audio"),
+                    RealizationId = null,
+                },
+                entry.ExpectedItems[0] with
+                {
+                    EntityId = "portable-a",
+                    Kind = "caption",
+                    ArtifactHash = Sha256("portable-audio"),
+                    RealizationId = null,
+                },
+            ],
         },
         _ => throw new ArgumentOutOfRangeException(nameof(driver), driver, null),
     };

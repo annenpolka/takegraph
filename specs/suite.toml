@@ -306,3 +306,682 @@ implementation_paths = [
 ]
 profiles = ["fast", "pr", "nightly"]
 residual = "The durable reservation closes process-crash and cross-route races; abrupt hardware power loss below filesystem sync and direct third-party YMM4 mutations remain outside this service fence."
+
+[[property]]
+id = "YMM-022"
+module = "ymm4LifecycleProtocol"
+expression = "applyAndCheckpointRequireExistingPath"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/external_mutation.rs",
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_export.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_mutation.rs",
+  "crates/takegraph-service/src/ymm4_native_extension.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Canonical stage/apply and checkpoints still require an existing YMM4 path. The separately approved initialization protocol may create that path; host dialog presentation remains outside both models."
+
+[[property]]
+id = "YMM-023"
+module = "ymm4ProjectInitializationProtocol"
+expression = "initializationApprovalIsDigestBound"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model binds an abstract digest; canonical SHA-256 construction and adapter serialization remain implementation boundaries."
+
+[[property]]
+id = "YMM-024"
+module = "ymm4ProjectInitializationProtocol"
+expression = "executionIsFullyApprovalBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Durable task/WAL serialization and process-crash injection remain integration boundaries."
+
+[[property]]
+id = "YMM-025"
+module = "ymm4ProjectInitializationProtocol"
+expression = "durableEffectsAreSourceBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+  "crates/takegraph-service/src/project_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model assumes authenticated active-session, project-path, and content-fingerprint observations; live YMM4 read-back fidelity requires supported-version tests."
+
+[[property]]
+id = "YMM-026"
+module = "ymm4ProjectInitializationProtocol"
+expression = "saveUntitledNeverOverwrites"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/BridgeHost.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The implementation must make destination non-existence and Save As publication race-safe. YMM4 API behavior, filesystem atomicity, and live fault injection remain integration boundaries."
+
+[[property]]
+id = "YMM-027"
+module = "ymm4ProjectInitializationProtocol"
+expression = "initializationIsExactlyOnce"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ProjectOperationStore.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Operation-ID recovery is modeled; live crashes between each filesystem publication and receipt publication still require fault injection."
+
+[[property]]
+id = "YMM-028"
+module = "ymm4ProjectInitializationProtocol"
+expression = "partialProgressIsRequestBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/project_operations.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ProjectOperationStore.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model preserves request-bound Save As and bootstrap partial states; operator-visible recovery reporting and live restart coverage remain integration boundaries."
+
+[[property]]
+id = "YMM-029"
+module = "ymm4ProjectInitializationProtocol"
+expression = "completedInitializationHasBothDurableSides"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model proves protocol state, not UI, operating-system, or YMM4 persistence behavior."
+
+[[property]]
+id = "YMM-030"
+module = "ymm4ProjectInitializationProtocol"
+expression = "preparedFileEvidenceIsMonotonic"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-node/src/ymm4.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ProjectOperationStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model orders abstract path/hash/length evidence; filesystem contents, hashing, durable receipt serialization, and crash injection remain integration boundaries."
+
+[[property]]
+id = "YMM-031"
+module = "ymm4ProjectInitializationProtocol"
+expression = "alreadyInitializedRequiresPreexistingPlan"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model requires exact source/head observations for a preexisting store; authenticated bridge observations and on-disk revision integrity remain implementation boundaries."
+
+[[property]]
+id = "YMM-032"
+module = "ymm4ProjectInitializationProtocol"
+expression = "recoveryResumeIsRequestBound"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-node/src/ymm4.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ProjectOperationStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Exact request rebinding is modeled; live restart, ambiguous transport failure, and every post-claim YMM4 path-rebind fault point still require integration fault injection."
+
+[[property]]
+id = "YMM-033"
+module = "ymm4ProjectInitializationProtocol"
+expression = "canonicalReservationFencesCompetitors"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The project-scoped reservation fence is modeled atomically; operating-system lock behavior and power-loss durability require integration tests."
+
+[[property]]
+id = "MCP-001"
+module = "agentReportProtocol"
+expression = "stagedImpliesCompleteReport"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/agent-text.ts",
+  "apps/mcp-server/src/server.ts",
+  "apps/mcp-server/src/project-session.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "This is the adapter-visible approval-token contract. It does not prove that a host delivers text, preserves structuredContent, or renders the MCP App."
+
+[[property]]
+id = "MCP-002"
+module = "agentReportProtocol"
+expression = "reportHeadsMatchState"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/agent-text.ts",
+  "apps/mcp-server/src/server.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Studio-session revision and canonical revision are distinct heads. Host display of those numbers is outside the model."
+
+[[property]]
+id = "MCP-003"
+module = "agentReportProtocol"
+expression = "queryReadyNeverStagesStudio"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/project-session.ts",
+  "apps/mcp-server/src/server.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Audio materialization remains a media-node residual; the model only forbids staging a query-ready studio take."
+
+[[property]]
+id = "MCP-004"
+module = "agentReportProtocol"
+expression = "safety"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/agent-text.ts",
+  "apps/mcp-server/src/server.ts",
+  "apps/mcp-server/src/project-session.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Legal adapter traces keep dual heads, complete stage reports, and blocked reconcile/save when the target link or path is missing. Live YMM4, VOICEVOX, and host truncation are not proven."
+
+[[property]]
+id = "MCP-005"
+module = "agentReportProtocol"
+expression = "unsavedNeverHoldsCanonicalTask"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/agent-text.ts",
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/external_mutation.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The agent-report model forbids ordinary canonical tasks while unsaved; the separately approved initialization protocol owns Save As. Live YMM4 untitled-session identity remains an integration boundary."
+
+[[property]]
+id = "YMM-034"
+module = "ymm4ChangeSetProtocol"
+expression = "preparationCompletionDoesNotChooseCanonicalOrder"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/facade.ts",
+  "apps/mcp-server/src/ymm4-workflow.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model fixes two representative operations; production limits, heterogeneous operation schemas, and parallel media-provider execution remain implementation boundaries."
+
+[[property]]
+id = "YMM-035"
+module = "ymm4ChangeSetProtocol"
+expression = "approvalIsExact"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/external_mutation.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/ApplyRequestDigest.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model binds an abstract ordered-batch digest; canonical cross-route serialization and SHA-256 construction must be implemented and tested."
+
+[[property]]
+id = "YMM-036"
+module = "ymm4ChangeSetProtocol"
+expression = "writerIsExclusive"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "One abstract writer covers the modeled change set; live YMM4 dispatcher behavior and third-party mutations remain outside the model."
+
+[[property]]
+id = "YMM-037"
+module = "ymm4ChangeSetProtocol"
+expression = "staleOrConflictingPlanNeverApplies"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/external_mutation.rs",
+  "crates/takegraph-service/src/project_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Authenticated target fingerprints and cross-process canonical CAS behavior remain implementation and integration boundaries."
+
+[[property]]
+id = "YMM-038"
+module = "ymm4ChangeSetProtocol"
+expression = "unresolvedPartialApplyFailsClosed"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/RecoveryJournalStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Durable per-operation progress, reverse-order rollback across heterogeneous drivers, and crash injection require implementation coverage."
+
+[[property]]
+id = "YMM-039"
+module = "ymm4ChangeSetProtocol"
+expression = "allReadBackBeforeCanonicalCommit"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/ymm4_export.rs",
+  "crates/takegraph-service/src/ymm4_native_extension.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "A unified receipt that proves readback for every operation kind does not yet exist and must fail closed for unsupported combinations."
+
+[[property]]
+id = "YMM-040"
+module = "ymm4ChangeSetProtocol"
+expression = "exactReplayIsAtMostOnce"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/RecoveryJournalStore.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model assumes durable operation-prefix evidence; live process crashes at every per-operation and receipt boundary still require fault injection."
+
+[[property]]
+id = "YMM-041"
+module = "ymm4EditSurfaceProtocol"
+expression = "unsupportedUnobservedUnmanagedOrLockedNeverApplies"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "crates/takegraph-core/src/native_extension.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "This is the contract for expanding the edit surface. Most modeled field classes remain unimplemented; reflection support, descriptor accuracy, and live YMM4 lock/ownership observation require implementation tests."
+
+[[property]]
+id = "YMM-042"
+module = "ymm4EditSurfaceProtocol"
+expression = "surfaceExpansionInvalidatesApproval"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+  "crates/takegraph-node/src/ymm4_capabilities.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model binds abstract surface, capability, schema, and descriptor revisions. Canonical serialization and migration of already-staged tasks remain implementation boundaries."
+
+[[property]]
+id = "YMM-043"
+module = "ymm4EditSurfaceProtocol"
+expression = "partialUpdatePreservesUntouchedAndUnknownFields"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Untouched and unknown fields are finite digest witnesses in the model. Lossless capture and restoration of every supported YMM4 item type require supported-version and plugin compatibility tests."
+
+[[property]]
+id = "YMM-044"
+module = "ymm4EditSurfaceProtocol"
+expression = "touchedFieldsRequireExactReadBack"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Exact field readback is abstract. Unit conversion, keyframe evaluation, effect parameters, and target-side normalization require cross-runtime fixtures and live tests."
+
+[[property]]
+id = "YMM-045"
+module = "ymm4EditSurfaceProtocol"
+expression = "readOnlyObservationDoesNotMutate"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "crates/takegraph-node/src/scene_composition.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model separates observation counters from target mutations. Dispatcher behavior, selection/playhead restoration, and dirty-state preservation remain live integration boundaries."
+
+[[property]]
+id = "YMM-046"
+module = "ymm4CompositionGraphProtocol"
+expression = "stableEntityIdentity"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "crates/takegraph-core/src/managed_cue.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model uses a finite monotonic identity allocator and tombstone. Stable identities for every native YMM4 item kind are not implemented and require migration/copy/duplicate tests."
+
+[[property]]
+id = "YMM-047"
+module = "ymm4CompositionGraphProtocol"
+expression = "noDanglingReferences"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Parent, group, mask, effect, framebuffer, scene, and transition references are finite representatives. Complete YMM4 graph discovery and private-reference mutation are not proven."
+
+[[property]]
+id = "YMM-048"
+module = "ymm4CompositionGraphProtocol"
+expression = "keyframesAreCanonical"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Two keyframes and four interpolation classes represent canonical ordering. Full curve payloads, duplicate-frame policy, and YMM4 interpolation semantics require a versioned portable schema."
+
+[[property]]
+id = "YMM-049"
+module = "ymm4CompositionGraphProtocol"
+expression = "effectChainIsCanonical"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/native_extension.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model proves order and ownership for two abstract effects. The live descriptor catalog currently exposes only a narrow typed mutation allowlist; parameters and most effects remain unsupported."
+
+[[property]]
+id = "YMM-065"
+module = "ymm4CompositionGraphProtocol"
+expression = "siblingPaintOrderIsCanonical"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "A finite sibling order models explicit paint-order mutation separately from timeline layer and effect-chain order. Generic item paint-order observation and mutation are not implemented."
+
+[[property]]
+id = "YMM-050"
+module = "ymm4CompositionGraphProtocol"
+expression = "referenceSafeDeletePolicy"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Implicit cascades are forbidden by the model. A complete incoming/outgoing reference index and explicit detach plans do not yet exist for generic YMM4 items."
+
+[[property]]
+id = "YMM-051"
+module = "ymm4CompositionGraphProtocol"
+expression = "mutationRequiresExactBinding"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Source graph, target graph, revision, fingerprint, descriptor, entity, and kind are abstract bindings. Authenticated observation and cross-process CAS remain implementation boundaries."
+
+[[property]]
+id = "YMM-052"
+module = "ymm4ProjectEditProtocol"
+expression = "unsupportedProjectEditNeverStages"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_operations.rs",
+  "apps/mcp-server/src/facade.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Project settings, generic timeline CRUD, character definitions, and template definition edits remain unavailable in the implementation and must continue to fail closed until a versioned capability exists."
+
+[[property]]
+id = "YMM-053"
+module = "ymm4ProjectEditProtocol"
+expression = "projectEditIsSourceAndSurfaceBound"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "crates/takegraph-node/src/ymm4_capabilities.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model binds project edits to abstract source and surface revisions. Project/scene identity discovery and settings-specific readback need implementation coverage before enabling any family."
+
+[[property]]
+id = "YMM-054"
+module = "ymm4ProjectEditProtocol"
+expression = "characterDependentsArePreservedOrRejected"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/native_extension.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "All character dependents are represented by managed/total counts and a digest. Character-definition mutation and a complete dependency index are not implemented."
+
+[[property]]
+id = "YMM-066"
+module = "ymm4ProjectEditProtocol"
+expression = "characterSettingTaxonomyIsSealed"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/native_extension.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Finite character name, group, voice, parameter, and portrait-setting classes define future approval scope. The current implementation only binds existing character descriptors and cannot edit character definitions."
+
+[[property]]
+id = "YMM-055"
+module = "ymm4ProjectEditProtocol"
+expression = "templateExpansionIsApprovalBound"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/native_extension.rs",
+  "crates/takegraph-service/src/ymm4_native_extension.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The template content and deterministic expansion are abstract digests. The live catalog currently has no bindable template and template-definition editing remains intentionally opaque."
+
+[[property]]
+id = "YMM-056"
+module = "ymm4ProjectEditProtocol"
+expression = "actualProjectEditInvalidatesDerivedTasks"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/project_operations.rs",
+  "crates/takegraph-service/src/scene_inspection.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Checkpoint, inspection, render, composition, and timeline-plan invalidation are represented by epochs. Durable cross-task invalidation and UI cache refresh require implementation tests."
+
+[[property]]
+id = "YMM-057"
+module = "ymm4ProjectEditProtocol"
+expression = "normalizedNoOpDoesNotAdvanceRevision"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/revision.rs",
+  "crates/takegraph-service/src/project_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "No-op normalization is abstract. Target-specific normalization for resolution, FPS, audio rate, background, and layer settings must be defined before those edits are enabled."
+
+[[property]]
+id = "YMM-058"
+module = "ymm4EditTransactionProtocol"
+expression = "stagedPreviewContainsWholeOrderedHeterogeneousBatch"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Three finite descriptors represent 1..128 heterogeneous operations. The current public timeline edit accepts only portable/native voice creates and the bridge rejects native extensions in this route."
+
+[[property]]
+id = "YMM-059"
+module = "ymm4EditTransactionProtocol"
+expression = "acceptedDescriptorListIsBoundedConflictFreeAndDependencyLegal"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/timeline_edit.rs",
+  "apps/mcp-server/src/facade.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model abstracts write footprints and dependencies as booleans. A field-level read/write-set schema and create-before-reference dependency graph remain to be implemented."
+
+[[property]]
+id = "YMM-060"
+module = "ymm4EditTransactionProtocol"
+expression = "singleWriterQueueAndGateAreExclusive"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The project queue and bridge gate are atomic model variables. The current implementation serializes writes but does not yet expose a general durable heterogeneous edit queue."
+
+[[property]]
+id = "YMM-061"
+module = "ymm4EditTransactionProtocol"
+expression = "wholePreimageAndWalPrecedeEveryMutation"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/RecoveryJournalStore.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.NativeExtension.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "A whole-transaction preimage across every future item/property driver does not yet exist. Filesystem durability and crash injection remain integration boundaries."
+
+[[property]]
+id = "YMM-062"
+module = "ymm4EditTransactionProtocol"
+expression = "allOperationsReadBackBeforeOneRevision"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.TimelineEdit.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model requires complete semantic readback before one revision. A unified receipt covering all edit families is not implemented."
+
+[[property]]
+id = "YMM-063"
+module = "ymm4EditTransactionProtocol"
+expression = "laterStagedTasksBecomeStaleAndRequireRepreview"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/project_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+  "apps/mcp-server/src/facade.ts",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model requires re-preview after a preceding commit. Automatic conflict-free rebase and a user-visible durable queue are deliberately not claimed."
+
+[[property]]
+id = "YMM-064"
+module = "ymm4EditTransactionProtocol"
+expression = "noPseudoBatchAcrossEndpoints"
+owner = "takegraph-mcp"
+criticality = "merge-blocking"
+implementation_paths = [
+  "apps/mcp-server/src/facade.ts",
+  "apps/mcp-server/src/ymm4-workflow.ts",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Legacy kind-specific tasks remain available for compatibility, but they must never be presented as one atomic transaction. A single mixed bridge endpoint is required before broadening the public batch schema."

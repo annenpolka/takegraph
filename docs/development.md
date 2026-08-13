@@ -58,7 +58,10 @@ pnpm test:bridge
 ```
 
 That stub exists only to compile and execute the pure boundary tests; never copy
-its output into YMM4. The installer always performs a normal real-contract build.
+its output into YMM4. Stub bridge artifacts are isolated below
+`TakeGraph.Ymm4Bridge/bin/contract-stub` (with intermediates below
+`obj/contract-stub`), while the installer always performs a normal real-contract
+build and keeps using `bin/Release/net10.0-windows/TakeGraph.Ymm4Bridge.dll`.
 
 Copy only the built `TakeGraph.Ymm4Bridge.dll` to
 `<YMM4>\user\plugin\TakeGraph.Ymm4Bridge\` while YMM4 is stopped, then restart
@@ -81,6 +84,20 @@ tree before installation:
 ```powershell
 .\scripts\Install-Ymm4Bridge.ps1 -Ymm4Path "C:\path\to\YMM4"
 ```
+
+The normal local update-and-restart path is:
+
+```powershell
+.\scripts\Update-Ymm4Bridge.ps1 -Ymm4Path "C:\path\to\YMM4"
+```
+
+It requests a normal YMM4 close, refuses to force-stop an app blocked on an
+unsaved-project prompt, invokes the production installer, launches YMM4 again,
+and waits for authenticated `/v1/health`. By default it reopens the named
+project observed before shutdown and waits until `/v1/project/snapshot`
+confirms the same path. Explicit `-Ymm4Arguments` override automatic project
+restoration. Pass `-RequiredCapability <name>` to make an update fail if a
+newly required bridge feature is not advertised.
 
 After restarting YMM4 with a named project open, run the read-only driver smoke
 and recovery check. Scene capture is opt-in because it temporarily moves YMM4's
@@ -130,12 +147,14 @@ cargo run -p takegraph-cli -- ymm4 save
 Stage and commit use the service-owned canonical project store at
 `.takegraph/project-store` by default. Override the shared root with
 `--state-root <path>` or `TAKEGRAPH_PROJECT_STATE_ROOT`. An existing project's
-first stage may bootstrap from the supplied `--head`; after that, `--head` must
-match the durable canonical head. The MCP server uses the same environment
+first canonical workflow must be staged and approved as
+`project_initialization`; ordinary stage/commit commands return
+`NotInitialized` and never bootstrap generation zero. After initialization,
+`--head` must match the durable canonical head. The MCP server uses the same environment
 override in production, and likewise shares `TAKEGRAPH_PROJECT_OPERATION_ROOT`
 with the CLI. After `canonical-head`, MCP passes the returned project ID as
 `--expected-project-id`; a project-tab switch before the follow-up snapshot is
-rejected before store bootstrap or mutation. A verified external receipt, target link, and
+rejected before canonical access or mutation. A verified external receipt, target link, and
 new revision are published together in an append-only hash-chained generation,
 so exact operation replay is idempotent and corrupt historical state fails
 closed.

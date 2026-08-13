@@ -241,7 +241,7 @@ internal sealed class RecoveryJournalStore
                 "failed" or "recovery_required")
             || entry.Driver is not (
                 "portable_pair" or "native_voice_create" or "native_voice_mutation" or
-                "native_extension")
+                "native_extension" or "timeline_edit_managed_cue_mixed")
             || entry.EntityIds is null
             || entry.RealizationIds is null
             || entry.ExpectedItems is null
@@ -329,7 +329,21 @@ internal sealed class RecoveryJournalStore
                     || entry.ExpectedItems.Count != entry.RealizationIds.Count))
             || (entry.Driver == "portable_pair"
                 && (entry.ExpectedItems.Count != checked(entry.EntityIds.Count * 2)
-                    || entry.ExpectedItems.Any(value => value.Kind is not ("audio" or "caption")))))
+                    || entry.ExpectedItems.Any(value => value.Kind is not ("audio" or "caption"))))
+            || (entry.Driver == "timeline_edit_managed_cue_mixed"
+                && (entry.PreservedStateDigests.Count != 0
+                    || !entry.EntityIds.ToHashSet(StringComparer.Ordinal).SetEquals(
+                        entry.ExpectedItems.Select(value => value.EntityId))
+                    || !entry.RealizationIds.ToHashSet().SetEquals(
+                        entry.ExpectedItems.Where(value => value.RealizationId is not null)
+                            .Select(value => Guid.Parse(value.RealizationId!)))
+                    || entry.ExpectedItems.Where(value => value.RealizationId is null)
+                        .GroupBy(value => value.EntityId, StringComparer.Ordinal)
+                        .Any(group => group.Count() != 2
+                            || group.Any(value => value.Kind is not ("audio" or "caption")))
+                    || entry.ExpectedItems.Where(value => value.RealizationId is not null)
+                        .GroupBy(value => value.RealizationId, StringComparer.OrdinalIgnoreCase)
+                        .Any(group => group.Count() != 1 || group.Single().Kind != "voice"))))
         {
             throw new InvalidDataException($"Recovery journal driver payload is malformed: {source}");
         }
@@ -399,6 +413,7 @@ internal sealed class RecoveryJournalStore
             // Later target drift may require reconciliation but can never
             // authorize restoring the pre-mutation image.
             "applied_unverified" => next is "verified" or "recovery_required",
+            "recovery_required" => next == "failed",
             _ => false,
         };
     }

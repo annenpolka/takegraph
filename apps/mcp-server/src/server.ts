@@ -8,6 +8,22 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import {
+  formatAgentError,
+  formatDescriptorInventoryText,
+  formatFollowUpReport,
+  formatRenderProfilesText,
+  formatStatusText,
+  formatStagedTaskReport,
+  formatStudioCommitText,
+  formatStudioGenerateText,
+  formatStudioSessionText,
+  formatStudioStageText,
+  formatYmm4DescribeText,
+  STORE_CANONICAL,
+  TAKEGRAPH_AGENT_GUIDE,
+} from "./agent-text.js";
+import { registerFacadeTools, TaskFacadeRegistry } from "./facade.js";
 import { ProjectSession, type ProjectState } from "./project-session.js";
 import { Ymm4Workflow } from "./ymm4-workflow.js";
 
@@ -24,6 +40,10 @@ export interface CreateServerOptions {
   session?: ProjectSession;
   viewHtml?: string;
   ymm4Workflow?: Ymm4Workflow;
+  /** Opt in to the route-specific model tools retained for compatibility. */
+  legacyTools?: boolean;
+  /** Shared presentation cache for task envelopes across server instances. */
+  facadeRegistry?: TaskFacadeRegistry;
   /** Trusted test/embedding override for the scene content-addressed root. */
   sceneArtifactRoot?: string;
 }
@@ -41,10 +61,31 @@ function errorResult(error: unknown) {
     content: [
       {
         type: "text" as const,
-        text: error instanceof Error ? error.message : String(error),
+        text: formatAgentError(error),
       },
     ],
   };
+}
+
+function textResult(text: string, structured: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent: structured,
+  };
+}
+
+async function canonicalDescribePayload(ymm4: Ymm4Workflow) {
+  const described = await ymm4.describe();
+  let head: { projectId: string; revision: number } | undefined;
+  let headError: string | undefined;
+  if (typeof ymm4.canonicalHead === "function") {
+    try {
+      head = await ymm4.canonicalHead();
+    } catch (error) {
+      headError = formatAgentError(error);
+    }
+  }
+  return { ...described, head, headError };
 }
 
 const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -264,8 +305,10 @@ async function sceneResult(
   const paths = captures
     .map((capture) => capture.artifactPath)
     .filter((candidate): candidate is string => Boolean(candidate));
-  const pathSummary =
-    paths.length === 0 ? "" : `\nInspection images:\n${paths.join("\n")}`;
+  const imageSummary =
+    paths.length === 0
+      ? ""
+      : `\nInspection images: ${paths.length} authenticated receipt entr${paths.length === 1 ? "y" : "ies"}; host paths omitted.`;
   if (includeImages && !sceneArtifactRoot) {
     throw new Error("Scene image attachment root is unavailable");
   }
@@ -274,7 +317,7 @@ async function sceneResult(
     : [];
   return {
     content: [
-      { type: "text" as const, text: `${message}${pathSummary}` },
+      { type: "text" as const, text: `${message}${imageSummary}` },
       ...images,
     ],
     structuredContent: result as Record<string, unknown>,
@@ -457,8 +500,9 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   const ymm4 = options.ymm4Workflow ?? new Ymm4Workflow();
   const sceneArtifactRoot =
     options.sceneArtifactRoot ?? ymm4.sceneCaptureArtifactRoot?.();
+  const facadeRegistry = options.facadeRegistry ?? new TaskFacadeRegistry();
   const toolMeta = {
-    ui: { resourceUri, visibility: ["model", "app"] as const },
+    ui: { resourceUri, visibility: ["app"] as const },
   };
 
   registerAppTool(
@@ -466,7 +510,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     "studio_project_describe",
     {
       title: "Open TakeGraph Editor",
-      description: "Describe the active TakeGraph project and open its editor.",
+      description:
+        "Inventory the in-memory studio session (not the canonical YMM4/project-store head) and open its editor. The text report includes utterance/take IDs and any staged patchId+digest.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
       _meta: toolMeta,
@@ -475,34 +520,68 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       const state = session.snapshot();
       return stateResult(
         state,
-        `TakeGraph project ${state.projectName} at revision ${state.revision}.`,
+        formatStudioSessionText(
+          state,
+          `Studio session ${state.projectName} at sessionRevision ${state.revision}.`,
+        ),
       );
     },
   );
 
+  registerFacadeTools(server, {
+    session,
+    ymm4,
+    registry: facadeRegistry,
+    resourceUri,
+    sceneResult: (result: unknown, message: string, includeImages = false) =>
+      sceneResult(result, message, includeImages, sceneArtifactRoot),
+  });
+
+  if (options.legacyTools) {
   server.registerTool(
     "ymm4_link_describe",
     {
       title: "Describe TakeGraph YMM4 bridge",
       description:
-        "Check the versioned TakeGraph YMM4 plugin, its managed capabilities, and the active project fingerprint.",
+        "Inventory the canonical YMM4/project-store: health, path, fingerprint, managed items, and canonical revision. This is not the studio-session head.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async () => {
       try {
-        const result = await ymm4.describe();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "TakeGraph YMM4 bridge and active project described.",
-            },
-          ],
-          structuredContent: result,
-        };
+        const result = await canonicalDescribePayload(ymm4);
+        return textResult(formatYmm4DescribeText(result), result);
       } catch (error) {
         return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "takegraph_status",
+    {
+      title: "Show TakeGraph agent status",
+      description:
+        "Inventory both the in-memory studio session and the canonical YMM4/project-store, list write workflows, and name the next legal tools. Read this before staging. Does not change state.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const studio = session.snapshot();
+      try {
+        const canonical = await canonicalDescribePayload(ymm4);
+        return textResult(formatStatusText({ studio, canonical }), {
+          studio,
+          canonical,
+          guide: TAKEGRAPH_AGENT_GUIDE,
+        });
+      } catch (error) {
+        const canonicalError = formatAgentError(error);
+        return textResult(formatStatusText({ studio, canonicalError }), {
+          studio,
+          canonicalError,
+          guide: TAKEGRAPH_AGENT_GUIDE,
+        });
       }
     },
   );
@@ -528,15 +607,21 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async (input) => {
       try {
         const result = await ymm4.stage(input);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 export ${result.handle} staged. Approve exact digest ${result.digest} to commit.`,
-            },
-          ],
-          structuredContent: result,
-        };
+        return textResult(
+          formatStagedTaskReport({
+            kind: "YMM4 portable-pair export",
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: result.handle,
+            digest: result.digest,
+            next: "ymm4_export_commit { handle, digest }",
+            fields: [
+              { key: "baseRevision", value: result.baseRevision },
+              { key: "projectId", value: result.project?.projectId },
+            ],
+          }),
+          result,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -558,15 +643,20 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle, digest }) => {
       try {
         const committed = await ymm4.commit(handle, digest);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 export ${handle} committed and verified.`,
-            },
-          ],
-          structuredContent: committed as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 portable-pair export ${handle} committed and verified.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            digest,
+            next: "ymm4_export_verify { handle }",
+            fields: [
+              { key: "canonicalRevision", value: (committed as { revision?: number }).revision },
+            ],
+          }),
+          committed as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -585,15 +675,16 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle }) => {
       try {
         const verified = await ymm4.verify(handle);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 export ${handle} matches verified read-back.`,
-            },
-          ],
-          structuredContent: verified as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 portable-pair export ${handle} matches verified read-back.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "optional ymm4_project_save only when projectPath already exists",
+          }),
+          verified as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -635,15 +726,22 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           );
         }
         const result = await ymm4.stageNativeVoice(input);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native VoiceItem export ${result.handle} staged. Approve exact digest ${result.digest} to commit.`,
-            },
-          ],
-          structuredContent: result,
-        };
+        return textResult(
+          formatStagedTaskReport({
+            kind: "YMM4 native VoiceItem",
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: result.handle,
+            digest: result.digest,
+            next: "ymm4_native_voice_commit { handle, digest }",
+            fields: [
+              { key: "baseRevision", value: result.baseRevision },
+              { key: "realizationId", value: result.realizationId },
+              { key: "projectId", value: result.project?.projectId },
+            ],
+          }),
+          result,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -665,15 +763,20 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle, digest }) => {
       try {
         const committed = await ymm4.commitNativeVoice(handle, digest);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native VoiceItem export ${handle} committed and verified.`,
-            },
-          ],
-          structuredContent: committed as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 native VoiceItem export ${handle} committed and verified.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            digest,
+            next: "ymm4_native_voice_verify { handle }",
+            fields: [
+              { key: "canonicalRevision", value: (committed as { revision?: number }).revision },
+            ],
+          }),
+          committed as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -692,15 +795,22 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle }) => {
       try {
         const verified = await ymm4.verifyNativeVoice(handle);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native VoiceItem export ${handle} matches verified semantic read-back.`,
-            },
-          ],
-          structuredContent: verified as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 native VoiceItem export ${handle} matches verified semantic read-back.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "optional ymm4_project_save only when projectPath already exists",
+            fields: [
+              {
+                key: "realizationKind",
+                value: (verified as { realizationKind?: string }).realizationKind,
+              },
+            ],
+          }),
+          verified as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -721,15 +831,23 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async (input) => {
       try {
         const staged = await ymm4.stageNativeVoiceMutations(input);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native voice mutation ${staged.handle} staged. Approve exact digest ${staged.digest} to commit.`,
-            },
-          ],
-          structuredContent: staged,
-        };
+        return textResult(
+          formatStagedTaskReport({
+            kind: "YMM4 native voice mutation",
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: staged.handle,
+            digest: staged.digest,
+            next: "ymm4_native_voice_mutation_commit { handle, digest }",
+            fields: [
+              { key: "baseRevision", value: staged.baseRevision },
+              { key: "operationId", value: staged.operationId },
+              { key: "realizationIds", value: staged.realizationIds?.join(",") },
+              { key: "projectId", value: staged.project?.projectId },
+            ],
+          }),
+          staged,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -751,15 +869,20 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle, digest }) => {
       try {
         const committed = await ymm4.commitNativeVoiceMutations(handle, digest);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native voice mutation ${handle} committed with authenticated replay and readback.`,
-            },
-          ],
-          structuredContent: committed as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 native voice mutation ${handle} committed with authenticated replay and readback.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            digest,
+            next: "ymm4_native_voice_mutation_verify { handle }",
+            fields: [
+              { key: "canonicalRevision", value: (committed as { revision?: number }).revision },
+            ],
+          }),
+          committed as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -778,15 +901,16 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle }) => {
       try {
         const verified = await ymm4.verifyNativeVoiceMutations(handle);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native voice mutation ${handle} matches live semantic readback.`,
-            },
-          ],
-          structuredContent: verified as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 native voice mutation ${handle} matches live semantic readback.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "optional ymm4_native_voice_mutation_artifacts { handle }",
+          }),
+          verified as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -805,15 +929,16 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async ({ handle }) => {
       try {
         const artifacts = await ymm4.captureNativeVoiceMutationArtifacts(handle);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `YMM4 native voice artifacts for ${handle} were hash-verified and imported into TakeGraph CAS.`,
-            },
-          ],
-          structuredContent: artifacts as Record<string, unknown>,
-        };
+        return textResult(
+          formatFollowUpReport({
+            lead: `YMM4 native voice artifacts for ${handle} were hash-verified and imported into TakeGraph CAS.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "no further mutation required; provenance is not a portable synthesis query",
+          }),
+          artifacts as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -857,7 +982,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const staged = result as { handle: string; digest?: string };
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${staged.handle} staged. A human must approve exact digest ${staged.digest ?? "(missing)"} before capture.`,
+          formatStagedTaskReport({
+            kind: "YMM4 scene inspection",
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: staged.handle,
+            digest: staged.digest,
+            next: "ymm4_scene_inspection_approve { handle, digest } then ymm4_scene_inspection_capture",
+          }),
         );
       } catch (error) {
         return errorResult(error);
@@ -882,7 +1014,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const result = await ymm4.approveSceneInspection(handle, digest);
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} approved for the exact staged digest.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} approved for the exact staged digest.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            digest,
+            next: "ymm4_scene_inspection_capture { handle }",
+          }),
         );
       } catch (error) {
         return errorResult(error);
@@ -904,7 +1043,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const result = await ymm4.captureSceneInspection(handle);
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} captured and ingested. Automated findings are advisory; human review is still required.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} captured and ingested. Automated findings are advisory; human review is still required.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "ymm4_scene_inspection_review { handle, reviewer }",
+          }),
           true,
           sceneArtifactRoot,
         );
@@ -931,7 +1076,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const result = await ymm4.reviewSceneInspection(handle, reviewer);
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} is ready for human review. Inspect every listed image, semantic diff, and automated finding before deciding.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} is ready for human review. Inspect every listed image, semantic diff, and automated finding before deciding.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "ymm4_scene_inspection_decide { handle, decision, note } after human image review",
+          }),
           true,
           sceneArtifactRoot,
         );
@@ -963,7 +1114,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         );
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} recorded the human decision: ${decision}.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} recorded the human decision: ${decision}.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "no automatic accept; this decision is the terminal human record",
+            fields: [{ key: "decision", value: decision }],
+          }),
         );
       } catch (error) {
         return errorResult(error);
@@ -985,7 +1143,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const result = await ymm4.sceneInspectionStatus(handle);
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} checked.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} checked.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "ymm4_scene_inspection_replay { handle } if evidence must be revalidated",
+          }),
         );
       } catch (error) {
         return errorResult(error);
@@ -1007,7 +1171,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         const result = await ymm4.replaySceneInspection(handle);
         return await sceneResult(
           result,
-          `YMM4 scene inspection ${handle} receipt replayed and evidence revalidated.`,
+          formatFollowUpReport({
+            lead: `YMM4 scene inspection ${handle} receipt replayed and evidence revalidated.`,
+            store: STORE_CANONICAL,
+            identityKey: "handle",
+            identity: handle,
+            next: "ymm4_scene_inspection_review { handle, reviewer } if a human decision is still open",
+          }),
           true,
           sceneArtifactRoot,
         );
@@ -1033,7 +1203,11 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: "The active YMM4 project was saved to its existing path.",
+              text: formatFollowUpReport({
+                lead: "The active YMM4 project was saved to its existing path.",
+                store: STORE_CANONICAL,
+                next: "canonical revision is unchanged; use takegraph_status to re-read path and fingerprint",
+              }),
             },
           ],
           structuredContent: saved as Record<string, unknown>,
@@ -1056,15 +1230,10 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async () => {
       try {
         const result = await ymm4.nativeExtensionDescriptors();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "YMM4 native descriptors were read without changing the project.",
-            },
-          ],
-          structuredContent: result as unknown as Record<string, unknown>,
-        };
+        return textResult(
+          formatDescriptorInventoryText(result),
+          result as unknown as Record<string, unknown>,
+        );
       } catch (error) {
         return errorResult(error);
       }
@@ -1091,7 +1260,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 native-extension task ${staged.handle} staged. Review warnings, preservation state, unknown effects, and every lossy field before approving exact digest ${staged.digest ?? "(missing)"}.`,
+              text: formatStagedTaskReport({
+                kind: "YMM4 native-extension task",
+                store: STORE_CANONICAL,
+                identityKey: "handle",
+                identity: staged.handle,
+                digest: staged.digest,
+                next: "ymm4_native_extension_approve { handle, digest } after reviewing warnings and lossy fields",
+              }),
             },
           ],
           structuredContent: result,
@@ -1121,7 +1297,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 native-extension task ${handle} approved for its exact digest.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 native-extension task ${handle} approved for its exact digest.`,
+                store: STORE_CANONICAL,
+                identityKey: "handle",
+                identity: handle,
+                digest,
+                next: "ymm4_native_extension_apply { handle }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1148,7 +1331,19 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 native-extension task ${handle} applied and verified.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 native-extension task ${handle} applied and verified.`,
+                store: STORE_CANONICAL,
+                identityKey: "handle",
+                identity: handle,
+                next: "ymm4_native_extension_verify { handle }",
+                fields: [
+                  {
+                    key: "canonicalRevision",
+                    value: (result as { revision?: number }).revision,
+                  },
+                ],
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1175,7 +1370,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 native-extension task ${handle} matches current semantic read-back.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 native-extension task ${handle} matches current semantic read-back.`,
+                store: STORE_CANONICAL,
+                identityKey: "handle",
+                identity: handle,
+                next: "ymm4_native_extension_status { handle } if drift or recovery must be rechecked",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1202,7 +1403,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 native-extension task ${handle} status checked.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 native-extension task ${handle} status checked.`,
+                store: STORE_CANONICAL,
+                identityKey: "handle",
+                identity: handle,
+                next: "re-stage only if status reports descriptor, artifact, or recovery drift",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1231,7 +1438,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 checkpoint ${operationId ?? "(unknown)"} staged. Execute it to save the existing project path and verify file evidence.`,
+              text: formatStagedTaskReport({
+                kind: "YMM4 checkpoint",
+                store: STORE_CANONICAL,
+                identityKey: "operationId",
+                identity: operationId ?? "(unknown)",
+                next: "ymm4_checkpoint_execute { operationId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1258,7 +1471,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 checkpoint ${operationId} executed; inspect its durable status and file receipt.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 checkpoint ${operationId} executed; inspect its durable status and file receipt.`,
+                store: STORE_CANONICAL,
+                identityKey: "operationId",
+                identity: operationId,
+                next: "ymm4_checkpoint_status { operationId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1285,7 +1504,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 checkpoint ${operationId} status read from the durable journal.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 checkpoint ${operationId} status read from the durable journal.`,
+                store: STORE_CANONICAL,
+                identityKey: "operationId",
+                identity: operationId,
+                next: "canonical revision is unchanged; use a verified checkpoint before ymm4_render_stage",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1312,7 +1537,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: "YMM4 render profile descriptors read without changing the project.",
+              text: formatRenderProfilesText(result),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1346,7 +1571,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 render ${taskId ?? "(unknown)"} staged for explicit execution.`,
+              text: formatStagedTaskReport({
+                kind: "YMM4 render",
+                store: STORE_CANONICAL,
+                identityKey: "taskId",
+                identity: taskId ?? "(unknown)",
+                next: "ymm4_render_execute { taskId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1373,7 +1604,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 render ${taskId} submitted or polled once; inspect the returned durable lifecycle.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 render ${taskId} submitted or polled once; inspect the returned durable lifecycle.`,
+                store: STORE_CANONICAL,
+                identityKey: "taskId",
+                identity: taskId,
+                next: "ymm4_render_status { taskId } or ymm4_render_cancel { taskId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1400,7 +1637,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 render ${taskId} status read from the durable journal.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 render ${taskId} status read from the durable journal.`,
+                store: STORE_CANONICAL,
+                identityKey: "taskId",
+                identity: taskId,
+                next: "canonical revision is unchanged; accept only after verified final-media evidence",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1427,7 +1670,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `Cancellation requested for YMM4 render ${taskId}.`,
+              text: formatFollowUpReport({
+                lead: `Cancellation requested for YMM4 render ${taskId}.`,
+                store: STORE_CANONICAL,
+                identityKey: "taskId",
+                identity: taskId,
+                next: "ymm4_render_status { taskId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1456,7 +1705,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `Managed YMM4 drift report ${reportDigest ?? "(unknown)"} staged. Every entry requires an explicit reconciliation decision.`,
+              text: formatStagedTaskReport({
+                kind: "YMM4 reconciliation report",
+                store: STORE_CANONICAL,
+                identityKey: "reportDigest",
+                identity: reportDigest ?? "(unknown)",
+                digest: reportDigest,
+                next: "ymm4_reconcile_preview { reportDigest, decisions }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1491,7 +1747,15 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 reconciliation preview staged. Review every action before accepting exact digest ${approvalDigest ?? "(unknown)"}.`,
+              text: formatStagedTaskReport({
+                kind: "YMM4 reconciliation preview",
+                store: STORE_CANONICAL,
+                identityKey: "reportDigest",
+                identity: reportDigest,
+                digest: approvalDigest,
+                next: "ymm4_reconcile_apply { reportDigest, approvalDigest }",
+                fields: [{ key: "approvalDigest", value: approvalDigest }],
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1524,7 +1788,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 reconciliation actions for report ${reportDigest} accepted without silent synchronization.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 reconciliation actions for report ${reportDigest} accepted without silent synchronization.`,
+                store: STORE_CANONICAL,
+                identityKey: "reportDigest",
+                identity: reportDigest,
+                digest: approvalDigest,
+                next: "ymm4_reconcile_child_status { childTaskId } for each accepted child",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1551,7 +1822,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `YMM4 reconciliation child ${childTaskId} loaded.`,
+              text: formatFollowUpReport({
+                lead: `YMM4 reconciliation child ${childTaskId} loaded.`,
+                store: STORE_CANONICAL,
+                identityKey: "childTaskId",
+                identity: childTaskId,
+                next: "use the child route tools (detach approve/execute or re-export dispatch); do not reuse the parent approval",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1584,7 +1861,14 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `Metadata detach ${childTaskId} approved for its exact current digest. YMM4 has not been changed.`,
+              text: formatFollowUpReport({
+                lead: `Metadata detach ${childTaskId} approved for its exact current digest. YMM4 has not been changed.`,
+                store: STORE_CANONICAL,
+                identityKey: "childTaskId",
+                identity: childTaskId,
+                digest: approvalDigest,
+                next: "ymm4_reconcile_detach_execute { childTaskId }",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1611,7 +1895,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `Metadata detach ${childTaskId} executed, verified by exact fresh YMM4 read-back, and permanently removed from canonical ownership.`,
+              text: formatFollowUpReport({
+                lead: `Metadata detach ${childTaskId} executed, verified by exact fresh YMM4 read-back, and permanently removed from canonical ownership.`,
+                store: STORE_CANONICAL,
+                identityKey: "childTaskId",
+                identity: childTaskId,
+                next: "canonical revision advanced; re-read takegraph_status",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1644,7 +1934,13 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           content: [
             {
               type: "text" as const,
-              text: `Canonical re-export ${childTaskId} was saved as a new existing-exporter preview. Use its returned handle and digest with the route-specific approval/apply tools; no YMM4 mutation or approval occurred.`,
+              text: formatFollowUpReport({
+                lead: `Canonical re-export ${childTaskId} was saved as a new existing-exporter preview. No YMM4 mutation or approval occurred.`,
+                store: STORE_CANONICAL,
+                identityKey: "childTaskId",
+                identity: childTaskId,
+                next: "use the returned exporter handle and digest with that route's approve/apply tools",
+              }),
             },
           ],
           structuredContent: result as Record<string, unknown>,
@@ -1654,6 +1950,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       }
     },
   );
+  }
 
   registerAppTool(
     server,
@@ -1667,7 +1964,10 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         ui: { resourceUri, visibility: ["app"] as const },
       },
     },
-    async () => stateResult(session.snapshot(), "TakeGraph state refreshed."),
+    async () => {
+      const state = session.snapshot();
+      return stateResult(state, formatStudioSessionText(state, "Studio session refreshed."));
+    },
   );
 
   registerAppTool(
@@ -1676,7 +1976,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     {
       title: "Create voice-take candidate",
       description:
-        "Create a new immutable VoiceTake candidate and capture its synthesis settings.",
+        "Create a new immutable VoiceTake candidate and capture its synthesis settings. The text report includes the new takeId. query-ready takes cannot be staged; after staging a ready take, call studio_patch_commit with the exact patchId and digest.",
       inputSchema: {
         utteranceId: z.string().min(1),
         speed: z.number().min(0.5).max(2),
@@ -1687,10 +1987,8 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async (input) => {
       try {
-        return stateResult(
-          session.generateVariant(input),
-          "A new VoiceTake candidate was created. Its synthesis query is ready; the audio artifact is not complete.",
-        );
+        const state = session.generateVariant(input);
+        return stateResult(state, formatStudioGenerateText(state));
       } catch (error) {
         return errorResult(error);
       }
@@ -1703,17 +2001,15 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     {
       title: "Preview take adoption",
       description:
-        "Stage a digest-bound patch that previews adopting an existing ready VoiceTake.",
+        "Stage a digest-bound patch that previews adopting an existing ready VoiceTake. The text report includes patchId and digest; next is studio_patch_commit { patchId, digest }.",
       inputSchema: { takeId: z.string().min(1) },
       annotations: { destructiveHint: false },
       _meta: toolMeta,
     },
     async ({ takeId }) => {
       try {
-        return stateResult(
-          session.stageTake(takeId),
-          `A previewable patch for ${takeId} was staged.`,
-        );
+        const state = session.stageTake(takeId);
+        return stateResult(state, formatStudioStageText(state));
       } catch (error) {
         return errorResult(error);
       }
@@ -1726,7 +2022,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     {
       title: "Approve and commit take patch",
       description:
-        "Approve the exact staged digest and commit it only if its base revision is current.",
+        "Approve the exact staged digest and commit it only if its base revision is current. Pass patchId and digest from the studio-session stage report. This advances sessionRevision, not the canonical YMM4 head.",
       inputSchema: {
         patchId: z.string().min(1),
         digest: z.string().length(64),
@@ -1737,14 +2033,30 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async (input) => {
       try {
         const state = await session.commitPatch(input);
-        return stateResult(
-          state,
-          `Patch committed. Project revision is now ${state.revision}.`,
-        );
+        return stateResult(state, formatStudioCommitText(state));
       } catch (error) {
         return errorResult(error);
       }
     },
+  );
+
+  server.registerResource(
+    "TakeGraph Agent Guide",
+    "takegraph://guide",
+    {
+      description:
+        "Agent-visible dual-store contract and write workflows. This is not proof of host, UI, or media behavior.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: typeof uri === "string" ? uri : uri.href,
+          mimeType: "text/markdown",
+          text: TAKEGRAPH_AGENT_GUIDE,
+        },
+      ],
+    }),
   );
 
   registerAppResource(

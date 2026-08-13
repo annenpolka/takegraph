@@ -328,7 +328,7 @@ pub fn materialize_native_extension_artifact(
     let extension = extension_for_media_type(&reference.media_type);
     let directory = artifact_root.join("sha256").join(&hex[..2]);
     fs::create_dir_all(&directory)?;
-    let destination = directory.join(format!("{hex}.{extension}"));
+    let destination = strip_windows_extended_prefix(directory.join(format!("{hex}.{extension}")));
     if destination.exists() {
         let artifact = Ymm4NativeExtensionArtifact {
             artifact_digest: reference.artifact_digest.clone(),
@@ -799,6 +799,17 @@ fn extension_for_media_type(media_type: &str) -> &'static str {
     }
 }
 
+fn strip_windows_extended_prefix(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        if let Some(unc) = stripped.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(stripped.to_string());
+    }
+    path
+}
+
 fn validate_media_kind(kind: AssetKind, media_type: &str) -> Result<(), NativeExtensionNodeError> {
     let valid = match kind {
         AssetKind::Image => media_type.starts_with("image/"),
@@ -907,6 +918,18 @@ mod tests {
             target.require_unchanged(&drifted),
             Err(NativeExtensionNodeError::DescriptorDrift { .. })
         ));
+    }
+
+    #[test]
+    fn windows_extended_prefix_is_stripped_for_bridge_paths() {
+        assert_eq!(
+            strip_windows_extended_prefix(PathBuf::from(r"\\?\C:\TakeGraph\a.jpg")),
+            PathBuf::from(r"C:\TakeGraph\a.jpg")
+        );
+        assert_eq!(
+            strip_windows_extended_prefix(PathBuf::from(r"C:\TakeGraph\a.jpg")),
+            PathBuf::from(r"C:\TakeGraph\a.jpg")
+        );
     }
 
     #[test]

@@ -64,7 +64,14 @@ internal sealed partial class Ymm4Facade
         NativeExtensionApplyRequestDto request)
     {
         ValidateNativeExtensionApplyRequest(request);
-        await applyGate.WaitAsync().ConfigureAwait(false);
+        var dispatcher = Application.Current?.Dispatcher
+            ?? throw new BridgeUnavailableException("YMM4 dispatcher is unavailable");
+        if (!dispatcher.CheckAccess())
+        {
+            return await dispatcher.InvokeAsync(
+                () => ApplyNativeExtensionsAsync(request)).Task.Unwrap();
+        }
+        await applyGate.WaitAsync().ConfigureAwait(true);
         try
         {
             if (projectOperationStore.TryGetNativeExtension(request.OperationId, out var existing)
@@ -97,7 +104,7 @@ internal sealed partial class Ymm4Facade
                 // Historical Applying recovery is driven solely by the exact
                 // request/WAL preimage. Current capability, catalog, artifact,
                 // or driver gates cannot strand a reserved old operation.
-                _ = await RecoverPendingJournalsCoreAsync().ConfigureAwait(false);
+                _ = await RecoverPendingJournalsCoreAsync().ConfigureAwait(true);
                 if (projectOperationStore.TryGetNativeExtension(
                         request.OperationId,
                         out var recoveredNative)
@@ -140,7 +147,7 @@ internal sealed partial class Ymm4Facade
             }
 
             ValidateMutationRuntime();
-            await EnsureRecoveryClearAsync().ConfigureAwait(false);
+            await EnsureRecoveryClearAsync().ConfigureAwait(true);
             var before = Snapshot();
             EnsureTarget(request.ProjectId, request.SceneId, before);
             EnsureFingerprint(request.ExpectedFingerprint, before.Fingerprint);
@@ -202,7 +209,7 @@ internal sealed partial class Ymm4Facade
                     operations,
                     request.Artifacts,
                     catalog,
-                    preparation).ConfigureAwait(false);
+                    preparation).ConfigureAwait(true);
                 BridgeFaultInjection.ThrowIf("after_mutation_before_readback");
                 var after = Snapshot();
                 var realizations = Application.Current.Dispatcher.Invoke(() =>
@@ -581,6 +588,17 @@ internal sealed partial class Ymm4Facade
             var operation = pair.Second;
             var requiredCapability = operation.Intent.Kind switch
             {
+                "portrait" => "portraitItem.upsert",
+                "face" => "faceItem.upsert",
+                "image" => "imageItem.upsert",
+                "video" => "videoItem.upsert",
+                "audio" or "bgm" => "audioItem.upsert",
+                "managed_effect" => "effect.typedMutation",
+                "template" => "template.instantiate",
+                _ => string.Empty,
+            };
+            var legacyCapability = operation.Intent.Kind switch
+            {
                 "portrait" => "native_portrait_upsert",
                 "face" => "native_face_upsert",
                 "image" => "native_image_upsert",
@@ -621,8 +639,11 @@ internal sealed partial class Ymm4Facade
                     return feature;
                 })
                 .ToArray();
+            var hasKindCapability =
+                capabilityNames.Contains(requiredCapability, StringComparer.Ordinal)
+                || capabilityNames.Contains(legacyCapability, StringComparer.Ordinal);
             if (capabilityNames.Length != 2
-                || !capabilityNames.Contains(requiredCapability, StringComparer.Ordinal)
+                || !hasKindCapability
                 || !capabilityNames.Contains("timeline.transaction", StringComparer.Ordinal))
             {
                 throw new BridgeValidationException(
@@ -844,6 +865,18 @@ internal sealed partial class Ymm4Facade
             });
         AddStructuredFeature(
             features,
+            "timelineEdit.apply",
+            has("timeline_edit_managed_cue_mixed"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["atomicity"] = "whole_request",
+                ["maxOperations"] = 128L,
+                ["mixedManagedCueStrategies"] = true,
+                ["nativeExtension"] = false,
+                ["orderedApply"] = true,
+            });
+        AddStructuredFeature(
+            features,
             "managedIdentity.detach",
             has("metadata_remark_detach")
                 && has("request_bound_receipts")
@@ -934,6 +967,17 @@ internal sealed partial class Ymm4Facade
                 ["mediaType"] = "image/png",
                 ["transientStateRestore"] = true,
             });
+        AddStructuredFeature(
+            features,
+            "scene.composition",
+            has("scene_composition_current"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["currentFrameOnly"] = true,
+                ["deterministicOrder"] = "layer_then_element_id",
+                ["explicitAvailability"] = true,
+                ["geometryUnits"] = "integer_pixels",
+            });
         foreach (var definition in new[]
         {
             ("portraitItem.upsert", "native_portrait_upsert", "portrait"),
@@ -962,6 +1006,19 @@ internal sealed partial class Ymm4Facade
             "readback.semantic",
             has("readback_verification"),
             new SortedDictionary<string, object>(StringComparer.Ordinal));
+        AddStructuredFeature(
+            features,
+            "project.initialize",
+            has("project_initialize_save_as_verified"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["atomicNoOverwrite"] = true,
+                ["canonicalRevisionAdvances"] = false,
+                ["fileHash"] = "sha256",
+                ["modes"] = "adopt_active,save_untitled",
+                ["newPathOnly"] = true,
+                ["sourceInstanceBound"] = true,
+            });
         AddStructuredFeature(
             features,
             "project.checkpoint",
@@ -1043,6 +1100,8 @@ internal sealed partial class Ymm4Facade
             "managedPair.apply" => ["identityCarrier", "semanticItemCount"],
             "targetPlan.apply" =>
                 ["canonicalVersion", "mixedStrategies", "resolvedBindings", "resolvedPlacement"],
+            "timelineEdit.apply" =>
+                ["atomicity", "maxOperations", "mixedManagedCueStrategies", "nativeExtension", "orderedApply"],
             "managedIdentity.detach" =>
                 ["freshReadback", "identityCarrier", "mutationScope", "nonRemarkDigestPreserved", "notStartedTombstone", "projectScopedIdentity"],
             "voiceItem.create" =>
@@ -1059,6 +1118,8 @@ internal sealed partial class Ymm4Facade
                 or "template.instantiate" =>
                 ["driverOperation", "exactLossAllowlist", "identityCarrier", "unknownEffectsPreserved"],
             "timeline.transaction" => ["durableRollback", "recoveryReadback", "undoBatch"],
+            "scene.composition" =>
+                ["currentFrameOnly", "deterministicOrder", "explicitAvailability", "geometryUnits"],
             "readback.semantic" => [],
             _ => throw new BridgeValidationException(
                 $"Unknown native-extension capability dependency: {feature}"),
@@ -2387,16 +2448,17 @@ internal sealed partial class Ymm4Facade
         NativeExtensionPreparation preparation)
     {
         var intent = operation.Intent;
-        var (methodName, argument) = intent.Kind switch
-        {
-            "portrait" => ("AddTachieItem", ResolveCharacterDescriptor(intent.DescriptorId!, catalog)),
-            "face" => ("AddFaceItem", ResolveCharacterDescriptor(intent.DescriptorId!, catalog)),
-            "image" => ("AddImageItem", ResolveArtifactPath(intent, artifacts)),
-            "video" => ("AddVideoItem", ResolveArtifactPath(intent, artifacts)),
-            "audio" or "bgm" => ("AddAudioItem", ResolveArtifactPath(intent, artifacts)),
-            _ => throw new BridgeValidationException(
-                $"Unsupported native-extension create kind: {intent.Kind}"),
-        };
+        var (methodName, argument) = await Application.Current.Dispatcher.InvokeAsync(() =>
+            intent.Kind switch
+            {
+                "portrait" => ("AddTachieItem", ResolveCharacterDescriptor(intent.DescriptorId!, catalog)),
+                "face" => ("AddFaceItem", ResolveCharacterDescriptor(intent.DescriptorId!, catalog)),
+                "image" => ("AddImageItem", (object)ResolveArtifactPath(intent, artifacts)),
+                "video" => ("AddVideoItem", (object)ResolveArtifactPath(intent, artifacts)),
+                "audio" or "bgm" => ("AddAudioItem", (object)ResolveArtifactPath(intent, artifacts)),
+                _ => throw new BridgeValidationException(
+                    $"Unsupported native-extension create kind: {intent.Kind}"),
+            });
         var created = await InvokeNativeAddAsync(
             preparation,
             methodName,

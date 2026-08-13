@@ -1,15 +1,17 @@
 use std::{fs, io::Write as _, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use takegraph_core::{Patch, ReconciliationDecision, RevisionId};
+use takegraph_core::ProjectInitializationMode;
+use takegraph_core::{Patch, PatchStatus, ReconciliationDecision, RevisionId};
 use takegraph_node::{
     ManagedUtterance, RenderOverwritePolicy, VoiceProvider, VoicevoxClient, Ymm4BridgeClient,
-    Ymm4NativeVoiceCue, Ymm4NativeVoiceMutation,
+    Ymm4Error, Ymm4NativeVoiceCue, Ymm4NativeVoiceMutation,
 };
 use takegraph_service::{
     DurableProjectStore, NativeExtensionStageManifest, ProjectOperationStore,
-    ReconciliationChildTask, ReconciliationDownstreamPreview, SceneReviewDecision, Ymm4ExportPatch,
-    Ymm4NativeExtensionTask, Ymm4NativeVoiceExportPatch, Ymm4NativeVoiceMutationPatch,
+    ReconciliationChildTask, ReconciliationDownstreamPreview, SceneReviewDecision,
+    TimelineEditStageManifest, Ymm4ExportPatch, Ymm4NativeExtensionTask,
+    Ymm4NativeVoiceExportPatch, Ymm4NativeVoiceMutationPatch, Ymm4TimelineEditTask,
 };
 use uuid::Uuid;
 
@@ -132,6 +134,15 @@ enum Ymm4Command {
         #[command(flatten)]
         connection: Ymm4Connection,
     },
+    /// Release the write gate for one operator-acknowledged `recovery_required` journal.
+    RecoveryAcknowledge {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+        #[arg(long)]
+        operation_id: Uuid,
+    },
     /// List the managed bridge capabilities.
     Capabilities {
         #[command(flatten)]
@@ -142,12 +153,58 @@ enum Ymm4Command {
         #[command(flatten)]
         connection: Ymm4Connection,
     },
+    /// Read the active scene's evaluated composition at the current frame.
+    Composition {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+    },
     /// Read the service-owned canonical revision for the active YMM4 project.
     CanonicalHead {
         #[command(flatten)]
         connection: Ymm4Connection,
         #[command(flatten)]
         state: ProjectStateOptions,
+    },
+    /// Stage a reviewable binding for the active YMM4 project.
+    ProjectInitializationStage {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+        #[command(flatten)]
+        operations: ProjectOperationOptions,
+        #[arg(long, value_parser = ["adopt_active", "save_untitled"])]
+        mode: String,
+        /// New absolute `.ymmp` path, required only for `save_untitled`.
+        #[arg(long)]
+        destination: Option<PathBuf>,
+    },
+    /// Approve the exact staged project initialization digest.
+    ProjectInitializationApprove {
+        #[command(flatten)]
+        operations: ProjectOperationOptions,
+        #[arg(long)]
+        operation_id: Uuid,
+        #[arg(long)]
+        digest: String,
+    },
+    /// Execute or resume an approved project initialization.
+    ProjectInitializationExecute {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+        #[command(flatten)]
+        operations: ProjectOperationOptions,
+        #[arg(long)]
+        operation_id: Uuid,
+    },
+    /// Read a durable project initialization lifecycle.
+    ProjectInitializationStatus {
+        #[command(flatten)]
+        operations: ProjectOperationOptions,
+        #[arg(long)]
+        operation_id: Uuid,
     },
     /// List fixed project controls supported by the active YMM4 version.
     Controls {
@@ -206,6 +263,44 @@ enum Ymm4Command {
         connection: Ymm4Connection,
         #[arg(long)]
         patch: PathBuf,
+    },
+    /// Stage one caller-ordered mixed portable/native voice transaction.
+    TimelineEditStage {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        task: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        head: u64,
+    },
+    /// Approve, atomically apply, verify, and publish one mixed transaction.
+    TimelineEditCommit {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+        #[arg(long)]
+        task: PathBuf,
+        #[arg(long)]
+        digest: String,
+        #[arg(long, default_value_t = 0)]
+        head: u64,
+    },
+    /// Verify every managed cue in a staged or committed mixed transaction.
+    TimelineEditVerify {
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[arg(long)]
+        task: PathBuf,
+    },
+    /// Read and payload-validate persisted timeline-edit lifecycle state.
+    TimelineEditStatus {
+        #[arg(long)]
+        task: PathBuf,
     },
     /// Stage native YMM4 `VoiceItem` creation from a JSON cue manifest.
     NativeVoiceStage {
@@ -704,6 +799,32 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let client = ymm4_client(connection)?;
             print_json(&client.health().await?)?;
         }
+        Ymm4Command::RecoveryAcknowledge {
+            connection,
+            state,
+            operation_id,
+        } => {
+            let client = ymm4_client(connection)?;
+            let journal = match client.acknowledge_recovery(operation_id).await {
+                Ok(journal) => Some(journal),
+                Err(Ymm4Error::Bridge { status, message })
+                    if status.as_u16() == 409 && message.contains("not operator-pending") =>
+                {
+                    None
+                }
+                Err(Ymm4Error::StaleExternalState { .. }) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let snapshot = client.snapshot().await?;
+            let store = DurableProjectStore::open_scoped(&state.state_root, &snapshot.project_id)?;
+            store.acknowledge_recovery_required_reservation(operation_id)?;
+            print_json(&serde_json::json!({
+                "journal": journal,
+                "canonicalReservationReleased": true,
+                "projectId": snapshot.project_id,
+                "revision": store.head()?,
+            }))?;
+        }
         Ymm4Command::Capabilities { connection } => {
             let client = ymm4_client(connection)?;
             print_json(&client.capabilities().await?)?;
@@ -712,18 +833,68 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let client = ymm4_client(connection)?;
             print_json(&client.snapshot().await?)?;
         }
+        Ymm4Command::Composition { connection } => {
+            let client = ymm4_client(connection)?;
+            print_json(&client.current_scene_composition().await?)?;
+        }
         Ymm4Command::CanonicalHead { connection, state } => {
             let client = ymm4_client(connection)?;
             let snapshot = client.snapshot().await?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &snapshot.project_id,
-                RevisionId(0),
-            )?;
+            let canonical =
+                DurableProjectStore::observe_scoped(&state.state_root, &snapshot.project_id)?;
             print_json(&serde_json::json!({
                 "projectId": snapshot.project_id,
-                "revision": store.head()?,
+                "initialized": canonical.is_some(),
+                "revision": canonical.map(|state| state.head),
             }))?;
+        }
+        Ymm4Command::ProjectInitializationStage {
+            connection,
+            state,
+            operations,
+            mode,
+            destination,
+        } => {
+            let client = ymm4_client(connection)?;
+            let mode = match mode.as_str() {
+                "adopt_active" => ProjectInitializationMode::AdoptActive,
+                "save_untitled" => ProjectInitializationMode::SaveUntitled,
+                _ => return Err("unsupported project initialization mode".into()),
+            };
+            let operation_store = ProjectOperationStore::new(operations.operation_root);
+            let record = operation_store
+                .stage_project_initialization(&state.state_root, &client, mode, destination)
+                .await?;
+            print_json(&record)?;
+        }
+        Ymm4Command::ProjectInitializationApprove {
+            operations,
+            operation_id,
+            digest,
+        } => {
+            let operation_store = ProjectOperationStore::new(operations.operation_root);
+            print_json(&operation_store.approve_project_initialization(operation_id, &digest)?)?;
+        }
+        Ymm4Command::ProjectInitializationExecute {
+            connection,
+            state,
+            operations,
+            operation_id,
+        } => {
+            let client = ymm4_client(connection)?;
+            let operation_store = ProjectOperationStore::new(operations.operation_root);
+            print_json(
+                &operation_store
+                    .execute_project_initialization(&state.state_root, &client, operation_id)
+                    .await?,
+            )?;
+        }
+        Ymm4Command::ProjectInitializationStatus {
+            operations,
+            operation_id,
+        } => {
+            let operation_store = ProjectOperationStore::new(operations.operation_root);
+            print_json(&operation_store.project_initialization_status(operation_id)?)?;
         }
         Ymm4Command::Controls { connection } => {
             let client = ymm4_client(connection)?;
@@ -755,11 +926,7 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let client = ymm4_client(connection)?;
             let utterances: Vec<ManagedUtterance> = serde_json::from_slice(&fs::read(manifest)?)?;
             let snapshot = client.snapshot().await?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &snapshot.project_id,
-                RevisionId(head),
-            )?;
+            let store = DurableProjectStore::open_scoped(&state.state_root, &snapshot.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             let export =
                 Ymm4ExportPatch::stage_from_snapshot(&client, canonical_head, snapshot, utterances)
@@ -789,11 +956,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
         } => {
             let client = ymm4_client(connection)?;
             let mut export: Ymm4ExportPatch = serde_json::from_slice(&fs::read(&patch)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &export.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &export.target.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             export.approve(&digest, export.patch.base)?;
             save_json(&patch, &export)?;
@@ -826,6 +990,95 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
                 }))?
             );
         }
+        Ymm4Command::TimelineEditStage {
+            connection,
+            state,
+            manifest,
+            task,
+            head,
+        } => {
+            let client = ymm4_client(connection)?;
+            let manifest: TimelineEditStageManifest = serde_json::from_slice(&fs::read(manifest)?)?;
+            let snapshot = client.snapshot().await?;
+            let store = DurableProjectStore::open_scoped(&state.state_root, &snapshot.project_id)?;
+            let canonical_head = require_canonical_head(&store, RevisionId(head))?;
+            let staged = Ymm4TimelineEditTask::stage_from_snapshot(
+                &client,
+                canonical_head,
+                snapshot,
+                manifest,
+            )
+            .await?;
+            save_json(&task, &staged)?;
+            print_json(&serde_json::json!({
+                "taskFile": task,
+                "patchId": staged.patch.id,
+                "digest": staged.patch.digest,
+                "baseRevision": staged.patch.base,
+                "operationId": staged.operation_id,
+                "project": staged.target,
+                "planDigest": staged.timeline_edit_plan.canonical_digest()?,
+                "timelineEditPlan": staged.timeline_edit_plan,
+            }))?;
+        }
+        Ymm4Command::TimelineEditCommit {
+            connection,
+            state,
+            task,
+            digest,
+            head,
+        } => {
+            let client = ymm4_client(connection)?;
+            let mut staged = Ymm4TimelineEditTask::from_json_slice(&fs::read(&task)?)?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
+            let canonical_head = require_canonical_head(&store, RevisionId(head))?;
+            let authorization_head =
+                timeline_edit_authorization_head(&staged.patch, canonical_head);
+            staged.approve(&digest, authorization_head)?;
+            save_json(&task, &staged)?;
+            let outcome = staged
+                .apply_and_finalize_durable(&client, &store, canonical_head)
+                .await;
+            // Persist an authenticated terminal failure receipt as well as a
+            // successful commit. Status recovery must not collapse
+            // recovery-required or rolled-back work back to merely Approved.
+            save_json(&task, &staged)?;
+            let outcome = outcome?;
+            print_json(&serde_json::json!({
+                "taskFile": task,
+                "baseRevision": staged.patch.base,
+                "revision": outcome.revision,
+                "canonicalReplay": outcome.canonical_replay,
+                "operationId": staged.operation_id,
+                "receipt": staged.receipt(),
+                "status": staged.patch.status,
+            }))?;
+        }
+        Ymm4Command::TimelineEditVerify { connection, task } => {
+            let client = ymm4_client(connection)?;
+            let staged = Ymm4TimelineEditTask::from_json_slice(&fs::read(&task)?)?;
+            staged.verify_current(&client).await?;
+            print_json(&serde_json::json!({
+                "taskFile": task,
+                "operationId": staged.operation_id,
+                "verified": true,
+                "receipt": staged.receipt(),
+            }))?;
+        }
+        Ymm4Command::TimelineEditStatus { task } => {
+            let staged = Ymm4TimelineEditTask::from_json_slice(&fs::read(&task)?)?;
+            print_json(&serde_json::json!({
+                "taskFile": task,
+                "patchStatus": staged.patch.status,
+                "baseRevision": staged.patch.base,
+                "digest": staged.patch.digest,
+                "approvedDigest": staged.patch.approved_digest,
+                "operationId": staged.operation_id,
+                "receiptStatus": staged.receipt().map(|receipt| &receipt.status),
+                "receipt": staged.receipt(),
+            }))?;
+        }
         Ymm4Command::NativeVoiceStage {
             connection,
             state,
@@ -836,11 +1089,7 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let client = ymm4_client(connection)?;
             let cues: Vec<Ymm4NativeVoiceCue> = serde_json::from_slice(&fs::read(manifest)?)?;
             let snapshot = client.snapshot().await?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &snapshot.project_id,
-                RevisionId(head),
-            )?;
+            let store = DurableProjectStore::open_scoped(&state.state_root, &snapshot.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             let export = Ymm4NativeVoiceExportPatch::stage_from_snapshot(
                 &client,
@@ -875,11 +1124,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let client = ymm4_client(connection)?;
             let mut export: Ymm4NativeVoiceExportPatch =
                 serde_json::from_slice(&fs::read(&patch)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &export.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &export.target.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             export.approve(&digest, export.patch.base)?;
             save_json(&patch, &export)?;
@@ -923,11 +1169,7 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let mutations: Vec<Ymm4NativeVoiceMutation> =
                 serde_json::from_slice(&fs::read(manifest)?)?;
             let snapshot = client.snapshot().await?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &snapshot.project_id,
-                RevisionId(head),
-            )?;
+            let store = DurableProjectStore::open_scoped(&state.state_root, &snapshot.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             let staged = Ymm4NativeVoiceMutationPatch::stage_from_snapshot(
                 &client,
@@ -957,11 +1199,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
         } => {
             let client = ymm4_client(connection)?;
             let mut mutation = Ymm4NativeVoiceMutationPatch::from_json_slice(&fs::read(&patch)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &mutation.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &mutation.target.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             mutation.approve(&digest, mutation.patch.base)?;
             save_json(&patch, &mutation)?;
@@ -998,11 +1237,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
         } => {
             let client = ymm4_client(connection)?;
             let mut mutation = Ymm4NativeVoiceMutationPatch::from_json_slice(&fs::read(&patch)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &mutation.target.project_id,
-                mutation.patch.base,
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &mutation.target.project_id)?;
             let bridge_artifact_root = match bridge_artifact_root {
                 Some(path) => path,
                 None => ymm4_native_voice_bridge_artifact_root()?,
@@ -1051,11 +1287,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
                 ymm4_native_extension_artifact_root()?,
             )
             .await?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &staged.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
             require_canonical_head(&store, RevisionId(head))?;
             save_json(&task, &staged)?;
             let lossy_approvals = staged
@@ -1093,11 +1326,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
         } => {
             let client = ymm4_client(connection)?;
             let mut staged = Ymm4NativeExtensionTask::from_json_slice(&fs::read(&task)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &staged.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             let approval_head = if staged.patch.status == takegraph_core::PatchStatus::Previewable {
                 staged.revalidate_preview(&client).await?;
@@ -1122,11 +1352,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
         } => {
             let client = ymm4_client(connection)?;
             let mut staged = Ymm4NativeExtensionTask::from_json_slice(&fs::read(&task)?)?;
-            let store = DurableProjectStore::open_scoped_or_bootstrap(
-                &state.state_root,
-                &staged.target.project_id,
-                RevisionId(head),
-            )?;
+            let store =
+                DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
             let canonical_head = require_canonical_head(&store, RevisionId(head))?;
             let outcome = staged
                 .apply_and_finalize_durable(&client, &store, canonical_head)
@@ -1498,11 +1725,22 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             let child = operation_store.reconciliation_child_status(&child_task_id)?;
             let project_id = reconciliation_child_project_id(&child.payload);
             let canonical = open_canonical(&state, project_id, RevisionId(head))?;
-            print_json(
-                &operation_store
-                    .execute_reconciliation_detach(&canonical, &client, &child_task_id)
-                    .await?,
-            )?;
+            let executed = operation_store
+                .execute_reconciliation_detach(&canonical, &client, &child_task_id)
+                .await?;
+            let ReconciliationChildTask::MetadataDetach(detach) = &executed.payload else {
+                return Err("reconciliation detach execution returned another child kind".into());
+            };
+            let committed_revision = detach
+                .committed_revision
+                .ok_or("verified reconciliation detach omitted its committed revision")?;
+            print_json(&serde_json::json!({
+                "canonicalReplay": canonical_replay_from_revisions(
+                    RevisionId(head),
+                    committed_revision,
+                ),
+                "record": executed,
+            }))?;
         }
         Ymm4Command::ReconcileReExportDispatch {
             connection,
@@ -1538,6 +1776,13 @@ fn reconciliation_child_project_id(child: &takegraph_service::ReconciliationChil
             &task.source.project_id
         }
     }
+}
+
+fn canonical_replay_from_revisions(
+    starting_head: RevisionId,
+    committed_revision: RevisionId,
+) -> bool {
+    committed_revision <= starting_head
 }
 
 fn save_reconciliation_downstream_task(
@@ -1577,13 +1822,24 @@ fn require_canonical_head(
     Ok(canonical)
 }
 
+/// Keeps first-time approval bound to the current canonical head while letting
+/// a persisted committed task re-authorize only its original exact digest.
+/// Durable replay still receives and checks the caller's current canonical
+/// head before consulting the operation-bound commit record and bridge receipt.
+fn timeline_edit_authorization_head(patch: &Patch, canonical_head: RevisionId) -> RevisionId {
+    if patch.status == PatchStatus::Committed {
+        patch.base
+    } else {
+        canonical_head
+    }
+}
+
 fn open_canonical(
     state: &ProjectStateOptions,
     project_id: &str,
     requested: RevisionId,
 ) -> Result<DurableProjectStore, Box<dyn std::error::Error>> {
-    let store =
-        DurableProjectStore::open_scoped_or_bootstrap(&state.state_root, project_id, requested)?;
+    let store = DurableProjectStore::open_scoped(&state.state_root, project_id)?;
     require_canonical_head(&store, requested)?;
     Ok(store)
 }
@@ -1679,6 +1935,174 @@ fn ymm4_native_voice_bridge_artifact_root() -> Result<PathBuf, Box<dyn std::erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_current_frame_composition_command_with_project_binding() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "ymm4",
+            "composition",
+            "--endpoint",
+            "http://127.0.0.1:8766",
+            "--token",
+            "secret",
+            "--expected-project-id",
+            "project-1",
+        ])
+        .unwrap();
+
+        let Command::Ymm4 {
+            command: Ymm4Command::Composition { connection },
+        } = cli.command
+        else {
+            panic!("expected the YMM4 composition command");
+        };
+        assert_eq!(connection.expected_project_id.as_deref(), Some("project-1"));
+    }
+
+    #[test]
+    fn parses_project_initialization_stage_without_adding_a_new_tool_family() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "ymm4",
+            "project-initialization-stage",
+            "--mode",
+            "save_untitled",
+            "--destination",
+            r"C:\projects\movie.ymmp",
+            "--state-root",
+            r"C:\state",
+            "--operation-root",
+            r"C:\operations",
+        ])
+        .unwrap();
+
+        let Command::Ymm4 {
+            command:
+                Ymm4Command::ProjectInitializationStage {
+                    mode, destination, ..
+                },
+        } = cli.command
+        else {
+            panic!("expected project initialization stage");
+        };
+        assert_eq!(mode, "save_untitled");
+        assert_eq!(destination, Some(PathBuf::from(r"C:\projects\movie.ymmp")));
+    }
+
+    #[test]
+    fn parses_timeline_edit_stage_contract() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "ymm4",
+            "timeline-edit-stage",
+            "--manifest",
+            "manifest.json",
+            "--task",
+            "task.json",
+            "--head",
+            "7",
+        ])
+        .unwrap();
+
+        let Command::Ymm4 {
+            command:
+                Ymm4Command::TimelineEditStage {
+                    manifest,
+                    task,
+                    head,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected timeline-edit-stage");
+        };
+        assert_eq!(manifest, PathBuf::from("manifest.json"));
+        assert_eq!(task, PathBuf::from("task.json"));
+        assert_eq!(head, 7);
+    }
+
+    #[test]
+    fn parses_pure_timeline_edit_status_without_bridge_options() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "ymm4",
+            "timeline-edit-status",
+            "--task",
+            "task.json",
+        ])
+        .unwrap();
+        let Command::Ymm4 {
+            command: Ymm4Command::TimelineEditStatus { task },
+        } = cli.command
+        else {
+            panic!("expected pure timeline-edit-status");
+        };
+        assert_eq!(task, PathBuf::from("task.json"));
+    }
+
+    #[test]
+    fn timeline_edit_retry_uses_original_base_only_after_commit() {
+        let base = RevisionId(7);
+        let canonical_head = RevisionId(8);
+        let mut patch = Patch::draft(base, "digest");
+        patch.validate().unwrap();
+        patch.materialize_preview().unwrap();
+
+        assert_eq!(
+            timeline_edit_authorization_head(&patch, canonical_head),
+            canonical_head,
+            "a previewable task must still fail approval against a stale base"
+        );
+
+        patch.approve().unwrap();
+        assert_eq!(
+            timeline_edit_authorization_head(&patch, canonical_head),
+            canonical_head,
+            "an approved but uncommitted task must still fail against a stale base"
+        );
+
+        assert_eq!(patch.commit(base).unwrap(), canonical_head);
+        assert_eq!(
+            timeline_edit_authorization_head(&patch, canonical_head),
+            base,
+            "only a persisted committed task may re-authorize its exact original approval"
+        );
+    }
+
+    #[test]
+    fn reconciliation_detach_replay_is_derived_from_committed_revision() {
+        assert!(!canonical_replay_from_revisions(
+            RevisionId(4),
+            RevisionId(5)
+        ));
+        assert!(canonical_replay_from_revisions(
+            RevisionId(5),
+            RevisionId(5)
+        ));
+        assert!(canonical_replay_from_revisions(
+            RevisionId(8),
+            RevisionId(5)
+        ));
+    }
+
+    #[test]
+    fn ordinary_canonical_open_never_bootstraps_an_uninitialized_project() {
+        let root =
+            std::env::temp_dir().join(format!("takegraph-cli-uninitialized-{}", Uuid::new_v4()));
+        let state = ProjectStateOptions {
+            state_root: root.clone(),
+        };
+
+        let error = open_canonical(&state, "project-uninitialized", RevisionId(0))
+            .expect_err("ordinary workflow must require explicit project initialization");
+        assert!(error.to_string().contains("not initialized"));
+        assert_eq!(
+            DurableProjectStore::observe_scoped(&root, "project-uninitialized").unwrap(),
+            None
+        );
+        assert!(!root.exists());
+    }
 
     #[test]
     fn save_json_atomically_replaces_an_existing_task_file() {

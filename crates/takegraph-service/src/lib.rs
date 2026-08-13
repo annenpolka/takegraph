@@ -18,8 +18,11 @@ pub mod ymm4_native_voice_export;
 pub mod ymm4_native_voice_mutation;
 pub mod ymm4_realization;
 pub mod ymm4_target_plan;
+pub mod ymm4_timeline_edit;
 
-pub use external_mutation::DurableExternalMutationOutcome;
+pub use external_mutation::{
+    DurableExternalMutationOutcome, UnsavedProjectError, require_existing_project_path,
+};
 pub use native_extension_plan::{
     ExistingNativeExtension, ExistingNativeExtensionKind, ExistingUpdateMode,
     NativeExtensionCapabilities, NativeExtensionFeature, NativeExtensionObservation,
@@ -27,18 +30,20 @@ pub use native_extension_plan::{
     plan_native_extensions_with_identity_overrides,
 };
 pub use project_operations::{
-    CheckpointTaskRecord, CheckpointTaskStatus, DurableTaskRecord, ProjectOperationError,
-    ProjectOperationStore, ReconciliationBridgeWireStatus, ReconciliationChildKind,
-    ReconciliationChildReference, ReconciliationChildTask, ReconciliationDetachContract,
-    ReconciliationDetachDraft, ReconciliationDetachRequirement, ReconciliationDetachStatus,
-    ReconciliationDownstreamPreview, ReconciliationExporterRoute, ReconciliationImportPatchDraft,
-    ReconciliationReExportManifest, ReconciliationReExportStatus, ReconciliationReExportTask,
-    ReconciliationTaskRecord, ReconciliationTaskStatus, RenderTaskRecord, RenderTaskStatus,
+    CheckpointTaskRecord, CheckpointTaskStatus, DurableTaskRecord, ProjectInitializationTaskRecord,
+    ProjectInitializationTaskStatus, ProjectOperationError, ProjectOperationStore,
+    ReconciliationBridgeWireStatus, ReconciliationChildKind, ReconciliationChildReference,
+    ReconciliationChildTask, ReconciliationDetachContract, ReconciliationDetachDraft,
+    ReconciliationDetachRequirement, ReconciliationDetachStatus, ReconciliationDownstreamPreview,
+    ReconciliationExporterRoute, ReconciliationImportPatchDraft, ReconciliationReExportManifest,
+    ReconciliationReExportStatus, ReconciliationReExportTask, ReconciliationTaskRecord,
+    ReconciliationTaskStatus, RenderTaskRecord, RenderTaskStatus,
 };
 pub use project_store::{
     DurableProjectState, DurableProjectStore, ExternalCommitRecord, ExternalMutationFence,
-    ManagedTargetState, PendingExternalCommit, PendingExternalCommitKind, ProjectStoreError,
-    TargetLink, VerifiedTargetBinding,
+    ManagedTargetState, PendingExternalCommit, PendingExternalCommitKind,
+    ProjectInitializationReservation, ProjectInitializationReservationOutcome,
+    ProjectInitializationReservationStatus, ProjectStoreError, TargetLink, VerifiedTargetBinding,
 };
 pub use scene_inspection::{
     ChangedCueFrameRange, SceneCaptureEvidence, SceneCaptureProfile, SceneCaptureSamplePlan,
@@ -56,6 +61,10 @@ pub use ymm4_native_voice_mutation::{Ymm4NativeVoiceMutationError, Ymm4NativeVoi
 pub use ymm4_realization::{RealizationReadbackError, normalize_realizations};
 pub use ymm4_target_plan::{
     TargetPlanBuildError, native_voice_target_plan, portable_pair_target_plan,
+};
+pub use ymm4_timeline_edit::{
+    TimelineEditStageManifest, TimelineEditStageOperation, Ymm4TimelineEditError,
+    Ymm4TimelineEditTask,
 };
 
 #[derive(Debug, Default)]

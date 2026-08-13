@@ -76,6 +76,22 @@ internal sealed class InvalidRequiredItemFixture
     internal string Frame => "1.5";
 }
 
+internal sealed class ExactPreviewFrameFixture
+{
+    internal int CurrentFrame { get; init; }
+
+    internal double CurrentPositionRate { get; init; }
+
+    internal TimeSpan StartPosition { get; init; }
+}
+
+internal sealed class EstimatedPreviewFrameFixture
+{
+    internal double CurrentPositionRate { get; init; }
+
+    internal TimeSpan StartPosition { get; init; }
+}
+
 internal sealed class ThrowingPreservationItemFixture
 {
     public string Dangerous

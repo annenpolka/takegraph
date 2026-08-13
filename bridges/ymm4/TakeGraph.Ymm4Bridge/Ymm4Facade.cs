@@ -15,6 +15,8 @@ internal sealed partial class Ymm4Facade
     private const string SupportedMutationYmm4Version = "4.55.1.1";
     private const string SceneCaptureDriver = "ymm4-preview-save-image/4.55.1.1";
     private const string CheckpointDriver = "ymm4-existing-path-save-checkpoint/4.55.1.1";
+    private const string ProjectInitializationDriver =
+        "ymm4-project-json-atomic-claim-rebind/4.55.1.1";
     private const string RenderDriver = "ymm4-command-line-encoder/4.55.1.1";
     private const string FinalMediaProbeProfile = "takegraph-final-media-probe/mp4-v3";
     private static readonly string[] TemplateMenuPropertyNames =
@@ -39,6 +41,9 @@ internal sealed partial class Ymm4Facade
     private readonly object historyGate = new();
     private AppliedBatch? lastBatch;
     private bool lastBatchUndone;
+    private readonly object projectInstanceGate = new();
+    private object? observedProjectInstance;
+    private string? observedProjectInstanceId;
 
     internal Ymm4Facade()
         : this(
@@ -68,6 +73,252 @@ internal sealed partial class Ymm4Facade
     {
         return Application.Current.Dispatcher.Invoke(SnapshotCore);
     }
+
+    /// Observes the current preview/timeline state in one dispatcher turn. A
+    /// read barrier waits for any in-flight mutation batch before dispatching;
+    /// the observer itself performs no seek, save, selection, or dirty-state
+    /// operation.
+    internal async Task<SceneCompositionSnapshotDto> CurrentSceneCompositionAsync()
+    {
+        ValidateObservationRuntime();
+        await applyGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                var main = RequireMainViewModel();
+                var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
+                    ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
+                var rawItems = ReadItems(timelineViewModel);
+                var projectPath = GetString(main, "ProjectFilePath", "ProjectPath");
+                var projectId = Hash($"project|{projectPath}");
+                var sceneId = GetString(timelineViewModel, "ID", "Id", "SceneId");
+                if (string.IsNullOrWhiteSpace(sceneId))
+                {
+                    throw new BridgeUnavailableException(
+                        "YMM4 active scene identity is unavailable for source-bound composition");
+                }
+                var fps = FindExactFps(main, timelineViewModel)
+                    ?? throw new BridgeUnavailableException("YMM4 scene FPS is unavailable");
+                var preview = RequirePreviewViewModel();
+                var frame = ReadExactPreviewFrame(preview, fps)
+                    ?? throw new BridgeUnavailableException("YMM4 current preview frame is unavailable");
+                var fingerprint = Fingerprint(rawItems, projectPath, sceneId, fps);
+                return BuildSceneCompositionSnapshot(
+                    projectId,
+                    sceneId,
+                    fingerprint,
+                    fps,
+                    frame,
+                    rawItems);
+            });
+        }
+        finally
+        {
+            applyGate.Release();
+        }
+    }
+
+    internal static SceneCompositionSnapshotDto BuildSceneCompositionSnapshot(
+        string projectId,
+        string sceneId,
+        string sourceFingerprint,
+        uint fps,
+        int frame,
+        IReadOnlyList<RawItem> rawItems)
+    {
+        if (string.IsNullOrWhiteSpace(projectId)
+            || string.IsNullOrWhiteSpace(sceneId)
+            || string.IsNullOrWhiteSpace(sourceFingerprint)
+            || fps == 0
+            || frame < 0)
+        {
+            throw new BridgeUnavailableException(
+                "Current scene composition identity or preview frame is unavailable");
+        }
+        if (rawItems.Any(item => item.Frame < 0 || item.Layer < 0 || item.Length <= 0))
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 timeline item placement is invalid for composition observation");
+        }
+
+        var candidates = rawItems
+            .Select(item => CreateSceneCompositionCandidate(item, projectId))
+            .ToArray();
+        var preferredCounts = candidates
+            .Where(candidate => candidate.PreferredId is not null)
+            .GroupBy(candidate => candidate.PreferredId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var active = candidates
+            .Where(candidate => (long)candidate.Item.Frame <= frame
+                && frame < (long)candidate.Item.Frame + candidate.Item.Length)
+            .ToArray();
+        var fallbackOrdinals = new Dictionary<string, int>(StringComparer.Ordinal);
+        var usedIds = new HashSet<string>(StringComparer.Ordinal);
+        var elements = new List<SceneCompositionElementDto>(active.Length);
+        foreach (var candidate in active)
+        {
+            var item = candidate.Item;
+            var hasUniqueRealizationIdentity = candidate.PreferredId is not null
+                && preferredCounts[candidate.PreferredId] == 1;
+            var stability = hasUniqueRealizationIdentity
+                ? "realization_identity"
+                : "session_only";
+            var elementId = hasUniqueRealizationIdentity
+                ? candidate.PreferredId!
+                : AllocateSessionElementId(item, fallbackOrdinals, usedIds);
+            if (!usedIds.Add(elementId))
+            {
+                // A duplicate/corrupt marker must never produce an ambiguous wire
+                // identity. Downgrade it to a session-only content identity.
+                stability = "session_only";
+                elementId = AllocateSessionElementId(item, fallbackOrdinals, usedIds);
+                _ = usedIds.Add(elementId);
+            }
+            elements.Add(new SceneCompositionElementDto(
+                elementId,
+                stability,
+                candidate.Kind,
+                item.Frame,
+                item.Layer,
+                item.Length,
+                true,
+                item.SelectionAvailable ? item.Selected : null,
+                candidate.Text,
+                new SceneCompositionVisualDto("unavailable", null, null, null, null)));
+        }
+
+        var unavailableFields = new SortedSet<string>(StringComparer.Ordinal)
+        {
+            "elements[].anchor",
+            "elements[].crop",
+            "elements[].maskAndParentRelations",
+            "elements[].opacity",
+            "elements[].paintOrder",
+            "elements[].rotation",
+            "elements[].scale",
+            "elements[].visual",
+            "elements[].visibility",
+            "viewport",
+        };
+        if (active.Any(candidate => !candidate.Item.SelectionAvailable))
+        {
+            unavailableFields.Add("elements[].selected");
+        }
+        if (active.Any(candidate => candidate.TextWithheld))
+        {
+            unavailableFields.Add("elements[].text");
+        }
+        return new SceneCompositionSnapshotDto(
+            1,
+            projectId,
+            sceneId,
+            sourceFingerprint,
+            fps,
+            frame,
+            new SceneCompositionViewportDto("unavailable", null, null),
+            elements
+                .OrderBy(element => element.Layer)
+                .ThenBy(element => element.ElementId, StringComparer.Ordinal)
+                .ToArray(),
+            "partial",
+            unavailableFields.ToArray());
+    }
+
+    private static SceneCompositionCandidate CreateSceneCompositionCandidate(
+        RawItem item,
+        string projectId)
+    {
+        string? preferredId = null;
+        string? explicitKind = null;
+        if (NativeExtensionRemarkCodec.TryDecode(item.Remark, out var extension)
+            && extension is not null
+            && string.Equals(extension.ProjectId, projectId, StringComparison.Ordinal))
+        {
+            preferredId = $"realization:{extension.RealizationId:N}:part:{extension.PartIndex}";
+            explicitKind = extension.Kind;
+        }
+        else if (RemarkCodec.TryDecode(item.Remark, out var voice)
+            && voice is not null
+            && string.Equals(voice.ProjectId, projectId, StringComparison.Ordinal))
+        {
+            preferredId = $"realization:{voice.RealizationId:N}:part:0";
+            explicitKind = "voice";
+        }
+
+        string? text = null;
+        if (MarkerCodec.TryDecode(item.Text, out var caption, out var portable)
+            && portable is not null)
+        {
+            text = caption;
+            explicitKind ??= "caption";
+        }
+        else if (preferredId is not null
+            && string.Equals(explicitKind, "voice", StringComparison.Ordinal))
+        {
+            text = item.Text;
+        }
+        else if (preferredId is not null
+            && string.Equals(explicitKind, "caption", StringComparison.Ordinal))
+        {
+            text = item.Text;
+        }
+        var normalizedText = string.IsNullOrWhiteSpace(text) ? null : text;
+        return new SceneCompositionCandidate(
+            item,
+            preferredId,
+            string.IsNullOrWhiteSpace(explicitKind)
+                ? SceneCompositionKind(item.TypeName)
+                : explicitKind,
+            normalizedText,
+            normalizedText is null && !string.IsNullOrWhiteSpace(item.Text));
+    }
+
+    private static string SceneCompositionKind(string typeName)
+    {
+        var separator = typeName.LastIndexOf('.');
+        var kind = separator >= 0 ? typeName[(separator + 1)..] : typeName;
+        if (kind.EndsWith("Item", StringComparison.Ordinal) && kind.Length > "Item".Length)
+        {
+            kind = kind[..^"Item".Length];
+        }
+        return string.IsNullOrWhiteSpace(kind) ? "unknown" : kind.ToLowerInvariant();
+    }
+
+    private static string AllocateSessionElementId(
+        RawItem item,
+        IDictionary<string, int> fallbackOrdinals,
+        IReadOnlySet<string> usedIds)
+    {
+        var contentId = Hash(string.Join('|',
+            item.TypeName,
+            item.Frame,
+            item.Layer,
+            item.Length,
+            item.GroupId,
+            item.Text,
+            item.AudioPath,
+            item.Remark,
+            item.CharacterName,
+            item.SpokenText));
+        _ = fallbackOrdinals.TryGetValue(contentId, out var next);
+        string candidate;
+        do
+        {
+            candidate = $"session:{contentId}:{next:D4}";
+            next++;
+        }
+        while (usedIds.Contains(candidate));
+        fallbackOrdinals[contentId] = next;
+        return candidate;
+    }
+
+    private sealed record SceneCompositionCandidate(
+        RawItem Item,
+        string? PreferredId,
+        string Kind,
+        string? Text,
+        bool TextWithheld);
 
     internal void BeginStartupRecovery()
     {
@@ -107,6 +358,47 @@ internal sealed partial class Ymm4Facade
             entries.Count(value => value.State == "rolled_back"),
             entries.Count(value => value.State == "recovery_required"),
             entries);
+    }
+
+    internal RecoveryJournalEntryDto AcknowledgeRecoveryRequired(Guid operationId)
+    {
+        if (!recoveryStore.TryGet(operationId, out var entry) || entry is null)
+        {
+            throw new BridgeNotFoundException(
+                $"Recovery journal entry was not found: {operationId}");
+        }
+        if (entry.State == "failed"
+            && (entry.Error?.Contains("operator acknowledged recovery_required", StringComparison.Ordinal)
+                ?? false))
+        {
+            return entry;
+        }
+        if (entry.State != "recovery_required")
+        {
+            throw new BridgeConflictException(
+                $"Recovery journal is not operator-pending: {entry.State}",
+                entry.AfterFingerprint ?? entry.BeforeFingerprint);
+        }
+        var error = string.IsNullOrWhiteSpace(entry.Error)
+            ? "operator acknowledged recovery_required and released the write gate"
+            : $"{entry.Error}; operator acknowledged recovery_required and released the write gate";
+        var acknowledged = recoveryStore.Transition(
+            operationId,
+            "failed",
+            entry.AfterFingerprint ?? entry.BeforeFingerprint,
+            error);
+        if (receiptStore.TryGet(operationId, out var receipt)
+            && receipt is not null
+            && receipt.Status == "recovery_required")
+        {
+            receiptStore.Put(receipt with
+            {
+                Status = "failed",
+                Verified = false,
+                Error = error,
+            });
+        }
+        return acknowledged;
     }
 
     internal PlanResponseDto Plan(PlanRequestDto request)
@@ -991,6 +1283,7 @@ internal sealed partial class Ymm4Facade
         await applyGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            EnsureNoPendingProjectInitialization();
             var standard = await RecoverPendingJournalsCoreAsync().ConfigureAwait(false);
             var detach = await RecoverPendingMetadataDetachJournalsCoreAsync().ConfigureAwait(false);
             return standard && detach;
@@ -1001,8 +1294,28 @@ internal sealed partial class Ymm4Facade
         }
     }
 
-    private async Task EnsureRecoveryClearAsync()
+    private async Task EnsureRecoveryClearAsync(Guid? resumedProjectInitialization = null)
     {
+        EnsureNoPendingProjectInitialization(resumedProjectInitialization);
+        if (resumedProjectInitialization is not null)
+        {
+            // The exact initialization POST is the sole permitted writer while
+            // its WAL is pending. Do not auto-recover an unrelated operation
+            // under this exception; require the operator to resolve the other
+            // recovery state first.
+            var pendingJournals = recoveryStore.ReadPending();
+            var pendingMetadataDetach = metadataDetachStore.ReadPending();
+            var pendingReceipts = receiptStore.ReadAll()
+                .Where(value => value.Status is "applying" or "recovery_required")
+                .ToArray();
+            EnsureRecoveryAuthorizationClear(pendingJournals, pendingReceipts);
+            if (pendingMetadataDetach.Count > 0)
+            {
+                throw new BridgeUnavailableException(
+                    "YMM4 has unresolved metadata detach recovery state; refusing project initialization resume");
+            }
+            return;
+        }
         _ = await RecoverPendingJournalsCoreAsync().ConfigureAwait(false);
         _ = await RecoverPendingMetadataDetachJournalsCoreAsync().ConfigureAwait(false);
         var unresolvedJournals = recoveryStore.ReadPending();
@@ -1021,6 +1334,24 @@ internal sealed partial class Ymm4Facade
             throw new BridgeUnavailableException(
                 $"YMM4 has unresolved metadata detach recovery state; refusing every write: {string.Join(", ", targets)}");
         }
+    }
+
+    private void EnsureNoPendingProjectInitialization(Guid? allowedOperationId = null)
+    {
+        var pending = projectOperationStore.ReadPendingProjectInitializations()
+            .Where(value => value.OperationId != allowedOperationId)
+            .ToArray();
+        if (pending.Length == 0)
+        {
+            return;
+        }
+        var operations = pending
+            .Select(value => value.OperationId.ToString("D"))
+            .Order(StringComparer.Ordinal)
+            .Take(4);
+        throw new BridgeUnavailableException(
+            "YMM4 has unresolved project initialization state; refusing every other write: "
+            + string.Join(", ", operations));
     }
 
     internal static void EnsureRecoveryAuthorizationClear(
@@ -1348,6 +1679,19 @@ internal sealed partial class Ymm4Facade
         RecoveryJournalEntryDto entry,
         ProjectSnapshotDto snapshot)
     {
+        if (entry.Driver == TimelineEditRecoveryDriver)
+        {
+            var realizationIds = entry.RealizationIds.Select(value => value.ToString("D"))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var portableEntityIds = entry.ExpectedItems
+                .Where(value => value.RealizationId is null)
+                .Select(value => value.EntityId)
+                .ToHashSet(StringComparer.Ordinal);
+            return snapshot.ManagedItems.Where(item =>
+                    portableEntityIds.Contains(item.EntityId)
+                    || item.RealizationId is not null && realizationIds.Contains(item.RealizationId))
+                .ToArray();
+        }
         if (entry.RealizationIds.Count > 0)
         {
             var realizationIds = entry.RealizationIds.Select(value => value.ToString("D"))
@@ -1375,6 +1719,43 @@ internal sealed partial class Ymm4Facade
         if (entry.Driver == "portable_pair")
         {
             return Equivalent(actual, entry.ExpectedItems);
+        }
+        if (entry.Driver == TimelineEditRecoveryDriver)
+        {
+            var portableExpected = entry.ExpectedItems
+                .Where(value => value.RealizationId is null)
+                .ToArray();
+            var portableIds = portableExpected.Select(value => value.EntityId)
+                .ToHashSet(StringComparer.Ordinal);
+            var portableActual = actual.Where(value => portableIds.Contains(value.EntityId))
+                .ToArray();
+            if (!Equivalent(portableActual, portableExpected))
+            {
+                return false;
+            }
+            var nativeExpected = entry.ExpectedItems
+                .Where(value => value.RealizationId is not null)
+                .ToArray();
+            var nativeActual = actual.Where(value => value.RealizationId is not null)
+                .ToArray();
+            if (nativeActual.Length != nativeExpected.Length)
+            {
+                return false;
+            }
+            return nativeExpected.All(expected => nativeActual.Any(item =>
+                item.Kind == "voice"
+                && item.EntityId == expected.EntityId
+                && item.Revision == expected.Revision
+                && string.Equals(
+                    item.RealizationId,
+                    expected.RealizationId,
+                    StringComparison.OrdinalIgnoreCase)
+                && item.Frame == expected.Frame
+                && item.Layer == expected.Layer
+                && item.Length is > 0
+                && item.Length <= expected.Length
+                && item.Text == expected.Text
+                && item.Speaker == expected.Speaker));
         }
         if (actual.Length != entry.ExpectedItems.Count)
         {
@@ -2543,6 +2924,7 @@ internal sealed partial class Ymm4Facade
 
     internal CapabilitiesDto Capabilities()
     {
+        var observationRuntime = IsSupportedObservationRuntime();
         var capabilities = new List<string>
         {
             "readback_verification",
@@ -2550,6 +2932,10 @@ internal sealed partial class Ymm4Facade
             "write_ahead_apply",
             "recovery_readback",
         };
+        if (observationRuntime)
+        {
+            capabilities.Add("scene_composition_current");
+        }
         if (!IsSupportedMutationRuntime())
         {
             return new CapabilitiesDto(BridgeContract.ProtocolVersion, capabilities);
@@ -2573,6 +2959,10 @@ internal sealed partial class Ymm4Facade
             "native_template_instantiate",
             "metadata_remark_detach",
         ]);
+        if (ProbeProjectInitializationRuntime())
+        {
+            capabilities.Add("project_initialize_save_as_verified");
+        }
         if (ProbeBindableRenderRuntime())
         {
             capabilities.AddRange(
@@ -2582,10 +2972,12 @@ internal sealed partial class Ymm4Facade
                 "project_render_media_receipt",
             ]);
         }
-        if (ProbeNativeVoiceRuntime())
+        var nativeVoiceRuntime = ProbeNativeVoiceRuntime();
+        if (nativeVoiceRuntime)
         {
             capabilities.AddRange(
             [
+                "timeline_edit_managed_cue_mixed",
                 "native_voice_create",
                 "native_voice_update_replace_preserving_user_state",
                 "native_voice_delete",
@@ -2610,6 +3002,22 @@ internal sealed partial class Ymm4Facade
     private static bool ProbeBindableRenderRuntime()
     {
         return TryCaptureRenderRuntimeBinding(out _, out _);
+    }
+
+    private static bool ProbeProjectInitializationRuntime()
+    {
+        try
+        {
+            return Application.Current.Dispatcher.Invoke(() =>
+            {
+                EnsureSaveAsRuntime();
+                return true;
+            });
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     internal DescriptorCatalogDto Descriptors()
@@ -3040,6 +3448,137 @@ internal sealed partial class Ymm4Facade
         }
     }
 
+    internal ProjectInitializationPreparationDto PrepareProjectInitialization(
+        ProjectInitializationPrepareRequestDto request)
+    {
+        ValidateProtocol(request.ProtocolVersion);
+        ValidateMutationRuntime();
+        return Application.Current.Dispatcher.Invoke(() =>
+        {
+            EnsureSaveAsRuntime();
+            var snapshot = SnapshotCore();
+            if (!string.IsNullOrWhiteSpace(snapshot.ProjectPath))
+            {
+                throw new BridgeConflictException(
+                    "Project initialization requires an active untitled YMM4 project",
+                    snapshot.Fingerprint);
+            }
+            if (snapshot.ManagedItems.Count != 0 || snapshot.NativeExtensions.Count != 0)
+            {
+                throw new BridgeConflictException(
+                    "Untitled project initialization cannot rebind existing TakeGraph-managed identities",
+                    snapshot.Fingerprint);
+            }
+            var destinationPath = ValidateNewProjectPath(request.DestinationPath);
+            var instanceId = CaptureProjectInstanceId(RequireActiveProjectInstance());
+            return new ProjectInitializationPreparationDto(
+                BridgeContract.ProtocolVersion,
+                ProjectInitializationProfileDigest(),
+                instanceId,
+                snapshot,
+                destinationPath,
+                ProjectPathDigest(destinationPath),
+                ProjectIdForPath(destinationPath),
+                FingerprintForPath(snapshot, destinationPath),
+                false);
+        });
+    }
+
+    internal ProjectInstanceBindingDto ProjectInstanceBinding()
+    {
+        ValidateMutationRuntime();
+        return Application.Current.Dispatcher.Invoke(() =>
+        {
+            var snapshot = SnapshotCore();
+            return new ProjectInstanceBindingDto(
+                BridgeContract.ProtocolVersion,
+                ProjectInitializationProfileDigest(),
+                CaptureProjectInstanceId(RequireActiveProjectInstance()),
+                snapshot);
+        });
+    }
+
+    internal async Task<ProjectInitializationReceiptDto> InitializeProjectAsync(
+        ProjectInitializationRequestDto request)
+    {
+        ValidateProjectInitializationRequest(request);
+        await applyGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (projectOperationStore.TryGetProjectInitialization(request.OperationId, out var existing)
+                && existing is not null)
+            {
+                EnsureProjectInitializationBinding(request, existing);
+                if (existing.Status == "verified")
+                {
+                    return ReplayProjectInitialization(existing);
+                }
+                if (existing.Status is "applying" or "recovery_required")
+                {
+                    await EnsureRecoveryClearAsync(request.OperationId).ConfigureAwait(false);
+                    return await ResumeProjectInitializationAsync(request, existing)
+                        .ConfigureAwait(false);
+                }
+                return existing;
+            }
+
+            await EnsureRecoveryClearAsync().ConfigureAwait(false);
+
+            var destinationPath = ValidateProjectPath(request.DestinationPath);
+            var before = await ReadExactProjectInitializationSourceAsync(request, destinationPath)
+                .ConfigureAwait(false);
+
+            var applying = new ProjectInitializationReceiptDto(
+                request.OperationId,
+                request.RequestDigest,
+                "applying",
+                request.DriverProfileDigest,
+                request.SourceProjectInstanceId,
+                request.SourceProjectId,
+                request.SourceSceneId,
+                before.Fingerprint,
+                destinationPath,
+                request.DestinationPathDigest,
+                request.PredictedProjectId,
+                request.PredictedFingerprint,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+            if (File.Exists(destinationPath))
+            {
+                var failed = applying with
+                {
+                    Status = "failed",
+                    AfterSnapshot = before,
+                    Error = "Project initialization destination is already owned by another file",
+                };
+                projectOperationStore.PutProjectInitialization(failed);
+                return failed;
+            }
+            projectOperationStore.PutProjectInitialization(applying);
+            return await ResumeProjectInitializationAsync(request, applying).ConfigureAwait(false);
+        }
+        finally
+        {
+            applyGate.Release();
+        }
+    }
+
+    internal ProjectInitializationReceiptDto GetProjectInitialization(Guid operationId)
+    {
+        if (!projectOperationStore.TryGetProjectInitialization(operationId, out var receipt)
+            || receipt is null)
+        {
+            throw new BridgeNotFoundException(
+                $"Project initialization receipt not found: {operationId}");
+        }
+        return receipt.Status == "verified" ? ReplayProjectInitialization(receipt) : receipt;
+    }
+
     internal CheckpointProfileDto CheckpointProfile()
     {
         ValidateMutationRuntime();
@@ -3186,6 +3725,779 @@ internal sealed partial class Ymm4Facade
                 ["existingPathOnly"] = "true",
             });
     }
+
+    private static string ProjectInitializationProfileDigest()
+    {
+        return HashDescriptor(
+            "project-initialization-profile",
+            new SortedDictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["driver"] = ProjectInitializationDriver,
+                ["newPathOnly"] = "true",
+                ["overwrite"] = "false",
+                ["extension"] = ".ymmp",
+                ["sourceInstanceBound"] = "true",
+                ["managedIdentityRebind"] = "rejected",
+                ["temporaryPath"] = "same_directory_unique_project_dto",
+                ["namespaceClaim"] = "atomic_move_no_overwrite",
+                ["pathRebind"] = "MainModel.ChangeProjectPath(string)",
+                ["savedStateCommit"] = "MainModel.IsProjectFileSaved=true",
+                ["serializer"] = "YukkuriMovieMaker.Json.Json.Save<Project>",
+            });
+    }
+
+    private static string ValidateProjectPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        {
+            throw new BridgeValidationException(
+                "Project initialization destination must be an absolute path");
+        }
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new BridgeValidationException(
+                $"Project initialization destination is invalid: {error.Message}");
+        }
+        if (!string.Equals(Path.GetExtension(fullPath), ".ymmp", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new BridgeValidationException(
+                "Project initialization destination must use the .ymmp extension");
+        }
+        if (Directory.Exists(fullPath))
+        {
+            throw new BridgeValidationException(
+                "Project initialization destination is a directory");
+        }
+        var parent = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent))
+        {
+            throw new BridgeValidationException(
+                "Project initialization destination directory must already exist");
+        }
+        return fullPath;
+    }
+
+    private static string ValidateNewProjectPath(string path)
+    {
+        var fullPath = ValidateProjectPath(path);
+        if (File.Exists(fullPath))
+        {
+            throw new BridgeConflictException(
+                "Project initialization never overwrites an existing file",
+                HashFile(fullPath));
+        }
+        return fullPath;
+    }
+
+    private static string ProjectPathDigest(string path) =>
+        HashDescriptor(
+            "project-initialization-path",
+            new SortedDictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["path"] = Path.GetFullPath(path),
+            });
+
+    private static string ProjectIdForPath(string path) => Hash($"project|{Path.GetFullPath(path)}");
+
+    private static string FingerprintForPath(ProjectSnapshotDto source, string destinationPath)
+    {
+        // Snapshot fingerprints bind the project path plus the exact scene/item
+        // state. An untitled Save As changes only that path.
+        var main = RequireMainViewModel();
+        var timeline = GetMember(main, "ActiveTimelineViewModel")
+            ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
+        return Fingerprint(
+            ReadItems(timeline),
+            Path.GetFullPath(destinationPath),
+            source.SceneId,
+            source.Fps);
+    }
+
+    private object RequireActiveProjectInstance()
+    {
+        var main = RequireMainViewModel();
+        // MainModel survives New/Open operations. Bind to the active domain
+        // Timeline object beneath its view model: it is replaced on New/Open
+        // (and on a scene switch), which distinguishes otherwise identical
+        // untitled projects even if a view-model shell were reused.
+        var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
+            ?? throw new BridgeUnavailableException(
+                "YMM4 active project instance is unavailable");
+        var timeline = GetField(timelineViewModel, "timeline")
+            ?? throw new BridgeUnavailableException(
+                "YMM4 active timeline instance is unavailable");
+        if (timeline.GetType().FullName != "YukkuriMovieMaker.Project.Timeline"
+            || timeline.GetType().Assembly.GetName().Name != "YukkuriMovieMaker")
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 active timeline type does not match the verified instance-binding profile");
+        }
+        return timeline;
+    }
+
+    private string CaptureProjectInstanceId(object instance)
+    {
+        lock (projectInstanceGate)
+        {
+            if (!ReferenceEquals(observedProjectInstance, instance))
+            {
+                observedProjectInstance = instance;
+                observedProjectInstanceId = Guid.NewGuid().ToString("D");
+            }
+            return observedProjectInstanceId!;
+        }
+    }
+
+    private void EnsureProjectInstanceId(string expected, object instance, string actualFingerprint)
+    {
+        lock (projectInstanceGate)
+        {
+            if (!ReferenceEquals(observedProjectInstance, instance)
+                || !string.Equals(observedProjectInstanceId, expected, StringComparison.Ordinal))
+            {
+                throw new BridgeConflictException(
+                    "The active YMM4 project instance changed after initialization preparation",
+                    actualFingerprint);
+            }
+        }
+    }
+
+    private static void EnsureSaveAsRuntime()
+    {
+        var main = RequireMainViewModel();
+        if (main.GetType().FullName != "YukkuriMovieMaker.ViewModels.MainViewModel"
+            || main.GetType().Assembly.GetName().Name != "YukkuriMovieMaker")
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 MainViewModel type does not match the verified Save As profile");
+        }
+        _ = GetField(main, "model")
+            ?? throw new BridgeUnavailableException(
+                "YMM4 MainViewModel.model is unavailable for instance binding");
+        var model = GetField(main, "model")!;
+        if (model.GetType().FullName != "YukkuriMovieMaker.Project.MainModel"
+            || model.GetType().Assembly.GetName().Name != "YukkuriMovieMaker")
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 MainModel type does not match the verified Save As profile");
+        }
+        var projectType = main.GetType().Assembly.GetType("YukkuriMovieMaker.Project.Project")
+            ?? throw new BridgeUnavailableException("YMM4 Project save DTO is unavailable");
+        if (projectType.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Count(constructor =>
+            {
+                var parameters = constructor.GetParameters();
+                return parameters.Length == 5
+                    && parameters[0].ParameterType == typeof(int)
+                    && parameters[1].ParameterType.FullName == "YukkuriMovieMaker.Project.Scenes"
+                    && parameters[2].ParameterType == typeof(string)
+                    && parameters[3].ParameterType == typeof(string)
+                    && parameters[4].ParameterType.IsGenericType
+                    && parameters[4].ParameterType.GetGenericTypeDefinition() == typeof(Dictionary<,>)
+                    && parameters[4].ParameterType.GetGenericArguments()[0] == typeof(string)
+                    && parameters[4].ParameterType.GetGenericArguments()[1].FullName
+                        == "YukkuriMovieMaker.Plugin.SerializableToolState";
+            }) != 1)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 Project save DTO constructor is unavailable or ambiguous");
+        }
+        var layoutService = GetField(model, "layoutService")
+            ?? throw new BridgeUnavailableException("YMM4 layout service is unavailable");
+        if (layoutService.GetType().FullName != "YukkuriMovieMaker.Views.Dock.LayoutService"
+            || layoutService.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Count(method =>
+                    method.Name == "TryGetLayoutXml"
+                    && method.ReturnType == typeof(bool)
+                    && method.GetParameters() is
+                    [{ ParameterType: var parameterType, IsOut: true }]
+                    && parameterType == typeof(string).MakeByRefType()) != 1
+            || layoutService.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Count(method => method.Name == "GetToolStates"
+                    && method.GetParameters().Length == 0
+                    && method.ReturnType.IsGenericType
+                    && method.ReturnType.GetGenericTypeDefinition() == typeof(Dictionary<,>)) != 1)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 layout serialization contract is unavailable or ambiguous");
+        }
+        var jsonType = FindLoadedType("YukkuriMovieMaker.Json.Json");
+        if (jsonType?.Assembly.GetName().Name != "YukkuriMovieMaker.Plugin"
+            || jsonType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Count(method =>
+                {
+                    if (method.Name != "Save" || !method.IsGenericMethodDefinition)
+                    {
+                        return false;
+                    }
+                    var parameters = method.GetParameters();
+                    return method.ReturnType == typeof(void)
+                        && parameters.Length == 3
+                        && parameters[1].ParameterType == typeof(string)
+                        && parameters[2].ParameterType.FullName
+                            == "Newtonsoft.Json.JsonSerializerSettings";
+                }) != 1)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 Json.Save<Project> is unavailable or ambiguous");
+        }
+        if (model.GetType().GetMethods(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Count(method =>
+                method.Name == "ChangeProjectPath"
+                && method.IsPublic
+                && !method.IsStatic
+                && method.ReturnType == typeof(void)
+                && method.GetParameters() is [{ ParameterType: var parameterType }]
+                && parameterType == typeof(string)) != 1)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 MainModel.ChangeProjectPath(string) is unavailable or ambiguous");
+        }
+        if (model.GetType().GetMethods(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Count(method =>
+                method.Name == "set_IsProjectFileSaved"
+                && !method.IsStatic
+                && method.ReturnType == typeof(void)
+                && method.GetParameters() is [{ ParameterType: var parameterType }]
+                && parameterType == typeof(bool)) != 1)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 MainModel.IsProjectFileSaved setter is unavailable or ambiguous");
+        }
+    }
+
+    private static void ValidateProjectInitializationRequest(ProjectInitializationRequestDto request)
+    {
+        ValidateProtocol(request.ProtocolVersion);
+        ValidateMutationRuntime();
+        if (request.OperationId == Guid.Empty
+            || request.Overwrite
+            || string.IsNullOrWhiteSpace(request.RequestDigest)
+            || string.IsNullOrWhiteSpace(request.DriverProfileDigest)
+            || string.IsNullOrWhiteSpace(request.SourceProjectInstanceId)
+            || string.IsNullOrWhiteSpace(request.SourceProjectId)
+            || string.IsNullOrWhiteSpace(request.SourceSceneId)
+            || string.IsNullOrWhiteSpace(request.ExpectedSourceFingerprint)
+            || string.IsNullOrWhiteSpace(request.DestinationPath)
+            || string.IsNullOrWhiteSpace(request.DestinationPathDigest)
+            || string.IsNullOrWhiteSpace(request.PredictedProjectId)
+            || string.IsNullOrWhiteSpace(request.PredictedFingerprint))
+        {
+            throw new BridgeValidationException(
+                "Project initialization request has invalid binding fields");
+        }
+        if (!string.Equals(
+                request.DriverProfileDigest,
+                ProjectInitializationProfileDigest(),
+                StringComparison.Ordinal)
+            || !ApplyRequestDigest.Matches(
+                request.RequestDigest,
+                ApplyRequestDigest.Compute(request)))
+        {
+            throw new BridgeValidationException(
+                "Project initialization profile or request digest is stale");
+        }
+    }
+
+    private static void ValidateProjectInitializationPredictions(
+        ProjectInitializationRequestDto request,
+        ProjectSnapshotDto before,
+        string destinationPath)
+    {
+        if (!PathsEqual(request.DestinationPath, destinationPath)
+            || !string.Equals(request.DestinationPathDigest, ProjectPathDigest(destinationPath), StringComparison.Ordinal)
+            || !string.Equals(request.PredictedProjectId, ProjectIdForPath(destinationPath), StringComparison.Ordinal)
+            || !string.Equals(request.PredictedFingerprint, FingerprintForPath(before, destinationPath), StringComparison.Ordinal))
+        {
+            throw new BridgeValidationException(
+                "Project initialization destination predictions do not match the active project");
+        }
+    }
+
+    private static void EnsureProjectInitializationBinding(
+        ProjectInitializationRequestDto request,
+        ProjectInitializationReceiptDto receipt)
+    {
+        if (receipt.OperationId != request.OperationId
+            || !string.Equals(receipt.RequestDigest, request.RequestDigest, StringComparison.Ordinal)
+            || !string.Equals(receipt.DriverProfileDigest, request.DriverProfileDigest, StringComparison.Ordinal)
+            || !string.Equals(receipt.SourceProjectInstanceId, request.SourceProjectInstanceId, StringComparison.Ordinal)
+            || !string.Equals(receipt.SourceProjectId, request.SourceProjectId, StringComparison.Ordinal)
+            || !string.Equals(receipt.SourceSceneId, request.SourceSceneId, StringComparison.Ordinal)
+            || !string.Equals(receipt.BeforeFingerprint, request.ExpectedSourceFingerprint, StringComparison.Ordinal)
+            || !string.Equals(receipt.DestinationPath, request.DestinationPath, StringComparison.Ordinal)
+            || !string.Equals(receipt.DestinationPathDigest, request.DestinationPathDigest, StringComparison.Ordinal)
+            || !string.Equals(receipt.PredictedProjectId, request.PredictedProjectId, StringComparison.Ordinal)
+            || !string.Equals(receipt.PredictedFingerprint, request.PredictedFingerprint, StringComparison.Ordinal))
+        {
+            throw new BridgeConflictException(
+                "Project initialization operation ID is already bound to another request",
+                receipt.BeforeFingerprint);
+        }
+    }
+
+    private static bool VerifyInitializedProject(
+        ProjectInitializationRequestDto request,
+        ProjectSnapshotDto after,
+        string destinationPath)
+    {
+        return PathsEqual(after.ProjectPath, destinationPath)
+            && string.Equals(after.ProjectId, request.PredictedProjectId, StringComparison.Ordinal)
+            && string.Equals(after.SceneId, request.SourceSceneId, StringComparison.Ordinal)
+            && string.Equals(after.Fingerprint, request.PredictedFingerprint, StringComparison.Ordinal)
+            && File.Exists(destinationPath)
+            && new FileInfo(destinationPath).Length > 0
+            && IsProjectSaved();
+    }
+
+    internal static ProjectInitializationReceiptDto ReplayProjectInitialization(
+        ProjectInitializationReceiptDto receipt)
+    {
+        // A verified record is a durable historical certificate. Re-reading
+        // the live file here would make a lost HTTP response unreplayable if
+        // the user subsequently edited, saved, moved, or deleted the file.
+        return receipt.Status == "verified" ? receipt with { Status = "replayed" } : receipt;
+    }
+
+    private async Task<ProjectInitializationReceiptDto> ResumeProjectInitializationAsync(
+        ProjectInitializationRequestDto request,
+        ProjectInitializationReceiptDto receipt)
+    {
+        var working = receipt.Status == "applying"
+            ? receipt
+            : receipt with
+            {
+                Status = "applying",
+                AfterSnapshot = null,
+                FileSha256 = null,
+                FileBytes = null,
+                Error = null,
+            };
+        if (!ReferenceEquals(working, receipt))
+        {
+            projectOperationStore.PutProjectInitialization(working);
+        }
+
+        try
+        {
+            var destinationPath = ValidateProjectPath(working.DestinationPath);
+            var current = Snapshot();
+            if (HasCompletePreparedProjectInitializationEvidence(working)
+                && IsInitializedProjectSnapshot(request, current, destinationPath)
+                && ProjectInitializationFileMatches(
+                    destinationPath,
+                    working.PreparedFileSha256,
+                    working.PreparedFileBytes)
+                && IsProjectSaved())
+            {
+                return SealVerifiedProjectInitialization(working, current);
+            }
+
+            if (File.Exists(destinationPath))
+            {
+                if (!HasCompletePreparedProjectInitializationEvidence(working))
+                {
+                    return await SealNoWriteProjectInitializationFailureAsync(
+                            request,
+                            working,
+                            destinationPath,
+                            "Project initialization destination was claimed by another file")
+                        .ConfigureAwait(false);
+                }
+                if (!ProjectInitializationFileMatches(
+                        destinationPath,
+                        working.PreparedFileSha256,
+                        working.PreparedFileBytes))
+                {
+                    throw new BridgeUnavailableException(
+                        "Existing project initialization destination does not match the durable prepared-file evidence");
+                }
+                await CommitProjectInitializationPathAsync(
+                        request,
+                        destinationPath,
+                        working.PreparedFileSha256!,
+                        working.PreparedFileBytes!.Value)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                _ = await ReadExactProjectInitializationSourceAsync(request, destinationPath)
+                    .ConfigureAwait(false);
+                if (working.PreparedTemporaryPath is null)
+                {
+                    working = working with
+                    {
+                        PreparedTemporaryPath = AllocateProjectInitializationTemporaryPath(
+                            destinationPath),
+                    };
+                    // The operation owns this unpredictable name only after
+                    // the path-only record is durable. No file is created first.
+                    projectOperationStore.PutProjectInitialization(working);
+                }
+
+                if (!HasCompletePreparedProjectInitializationEvidence(working))
+                {
+                    await SerializeProjectInitializationTemporaryAsync(
+                            request,
+                            destinationPath,
+                            working.PreparedTemporaryPath,
+                            recreatePathOnly: true)
+                        .ConfigureAwait(false);
+                    BridgeFaultInjection.ThrowIf("after_project_initialization_temp_save");
+                    var prepared = ReadProjectInitializationFileEvidence(
+                        working.PreparedTemporaryPath);
+                    working = working with
+                    {
+                        PreparedFileSha256 = prepared.Sha256,
+                        PreparedFileBytes = prepared.Bytes,
+                    };
+                    // This receipt must reach stable storage before the
+                    // no-overwrite namespace claim. It is the only authority
+                    // for recognizing a claimed destination after a crash.
+                    projectOperationStore.PutProjectInitialization(working);
+                    BridgeFaultInjection.ThrowIf("after_project_initialization_evidence");
+                }
+                else if (!File.Exists(working.PreparedTemporaryPath))
+                {
+                    // A complete receipt with neither final nor temporary file
+                    // can only be retried from the still-exact source. The
+                    // recreated bytes must match the immutable receipt.
+                    await SerializeProjectInitializationTemporaryAsync(
+                            request,
+                            destinationPath,
+                            working.PreparedTemporaryPath,
+                            recreatePathOnly: false)
+                        .ConfigureAwait(false);
+                }
+
+                if (!ProjectInitializationFileMatches(
+                        working.PreparedTemporaryPath,
+                        working.PreparedFileSha256,
+                        working.PreparedFileBytes))
+                {
+                    throw new BridgeUnavailableException(
+                        "Prepared project file does not match its durable hash and byte count");
+                }
+                ClaimPreparedProjectInitializationPath(
+                    working.PreparedTemporaryPath,
+                    destinationPath,
+                    working.PreparedFileSha256!,
+                    working.PreparedFileBytes!.Value);
+                BridgeFaultInjection.ThrowIf("after_project_initialization_claim");
+                await CommitProjectInitializationPathAsync(
+                        request,
+                        destinationPath,
+                        working.PreparedFileSha256!,
+                        working.PreparedFileBytes!.Value)
+                    .ConfigureAwait(false);
+            }
+
+            BridgeFaultInjection.ThrowIf("after_project_initialization_rebind");
+            var after = Snapshot();
+            if (!VerifyInitializedProject(request, after, destinationPath)
+                || !ProjectInitializationFileMatches(
+                    destinationPath,
+                    working.PreparedFileSha256,
+                    working.PreparedFileBytes))
+            {
+                throw new BridgeUnavailableException(
+                    "YMM4 project initialization read-back did not match the exact prepared destination");
+            }
+            return SealVerifiedProjectInitialization(working, after);
+        }
+        catch (BridgeSimulatedCrashException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            var after = TrySnapshot();
+            var finalEvidence = TryReadProjectInitializationFileEvidence(working.DestinationPath);
+            var recoveryRequired = working with
+            {
+                Status = "recovery_required",
+                AfterSnapshot = after,
+                FileSha256 = finalEvidence?.Sha256,
+                FileBytes = finalEvidence?.Bytes,
+                Error = error.GetBaseException().Message,
+            };
+            projectOperationStore.PutProjectInitialization(recoveryRequired);
+            return recoveryRequired;
+        }
+    }
+
+    private async Task<ProjectSnapshotDto> ReadExactProjectInitializationSourceAsync(
+        ProjectInitializationRequestDto request,
+        string destinationPath)
+    {
+        return await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            var source = SnapshotCore();
+            EnsureExactProjectInitializationSource(request, source, destinationPath);
+            return source;
+        });
+    }
+
+    private void EnsureExactProjectInitializationSource(
+        ProjectInitializationRequestDto request,
+        ProjectSnapshotDto source,
+        string destinationPath)
+    {
+        EnsureTarget(request.SourceProjectId, request.SourceSceneId, source);
+        EnsureFingerprint(request.ExpectedSourceFingerprint, source.Fingerprint);
+        if (!string.IsNullOrWhiteSpace(source.ProjectPath))
+        {
+            throw new BridgeConflictException(
+                "The active YMM4 project was already assigned a path",
+                source.Fingerprint);
+        }
+        if (source.ManagedItems.Count != 0 || source.NativeExtensions.Count != 0)
+        {
+            throw new BridgeConflictException(
+                "Untitled project initialization cannot rebind existing TakeGraph-managed identities",
+                source.Fingerprint);
+        }
+        ValidateProjectInitializationPredictions(request, source, destinationPath);
+        EnsureProjectInstanceId(
+            request.SourceProjectInstanceId,
+            RequireActiveProjectInstance(),
+            source.Fingerprint);
+    }
+
+    private async Task<ProjectInitializationReceiptDto> SealNoWriteProjectInitializationFailureAsync(
+        ProjectInitializationRequestDto request,
+        ProjectInitializationReceiptDto receipt,
+        string destinationPath,
+        string error)
+    {
+        if (HasCompletePreparedProjectInitializationEvidence(receipt))
+        {
+            throw new BridgeUnavailableException(
+                "A complete prepared-file receipt cannot be downgraded to a no-write result");
+        }
+        var source = await ReadExactProjectInitializationSourceAsync(request, destinationPath)
+            .ConfigureAwait(false);
+        if (receipt.PreparedTemporaryPath is not null)
+        {
+            if (!IsOwnedProjectInitializationTemporaryPath(
+                    destinationPath,
+                    receipt.PreparedTemporaryPath))
+            {
+                throw new BridgeUnavailableException(
+                    "Project initialization temporary path is not operation-owned");
+            }
+            if (Directory.Exists(receipt.PreparedTemporaryPath))
+            {
+                throw new BridgeUnavailableException(
+                    "Project initialization temporary path was replaced by a directory");
+            }
+            if (File.Exists(receipt.PreparedTemporaryPath))
+            {
+                File.Delete(receipt.PreparedTemporaryPath);
+            }
+            if (File.Exists(receipt.PreparedTemporaryPath))
+            {
+                throw new BridgeUnavailableException(
+                    "Project initialization temporary file could not be cleaned");
+            }
+        }
+        var failed = receipt with
+        {
+            Status = "failed",
+            PreparedTemporaryPath = null,
+            PreparedFileSha256 = null,
+            PreparedFileBytes = null,
+            AfterSnapshot = source,
+            FileSha256 = null,
+            FileBytes = null,
+            Error = error,
+        };
+        projectOperationStore.PutProjectInitialization(failed);
+        return failed;
+    }
+
+    private async Task SerializeProjectInitializationTemporaryAsync(
+        ProjectInitializationRequestDto request,
+        string destinationPath,
+        string temporaryPath,
+        bool recreatePathOnly)
+    {
+        if (!IsOwnedProjectInitializationTemporaryPath(destinationPath, temporaryPath))
+        {
+            throw new BridgeUnavailableException(
+                "Project initialization temporary path is not operation-owned");
+        }
+        if (Directory.Exists(temporaryPath))
+        {
+            throw new BridgeUnavailableException(
+                "Project initialization temporary path was replaced by a directory");
+        }
+        if (recreatePathOnly && File.Exists(temporaryPath))
+        {
+            File.Delete(temporaryPath);
+        }
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            var source = SnapshotCore();
+            EnsureExactProjectInitializationSource(request, source, destinationPath);
+            EnsureSaveAsRuntime();
+            SaveProjectDtoToTemporary(destinationPath, temporaryPath);
+        });
+        using var stream = new FileStream(
+            temporaryPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.Read,
+            4096,
+            FileOptions.WriteThrough);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private async Task CommitProjectInitializationPathAsync(
+        ProjectInitializationRequestDto request,
+        string destinationPath,
+        string expectedSha256,
+        ulong expectedBytes)
+    {
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            // Keep the exact destination open without write/delete sharing
+            // through the YMM path mutation. This closes the evidence-check
+            // versus rebind race for ordinary filesystem participants.
+            using var destination = new FileStream(
+                destinationPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan);
+            var actualBytes = checked((ulong)destination.Length);
+            var actualSha256 = Convert.ToHexStringLower(SHA256.HashData(destination));
+            if (actualBytes != expectedBytes
+                || !ApplyRequestDigest.Matches(actualSha256, expectedSha256))
+            {
+                throw new BridgeUnavailableException(
+                    "Project initialization destination changed before YMM path rebind");
+            }
+            var source = SnapshotCore();
+            EnsureExactProjectInitializationSource(request, source, destinationPath);
+            ChangeActiveProjectPathCore(destinationPath, saved: true);
+        });
+    }
+
+    private ProjectInitializationReceiptDto SealVerifiedProjectInitialization(
+        ProjectInitializationReceiptDto receipt,
+        ProjectSnapshotDto after)
+    {
+        if (!HasCompletePreparedProjectInitializationEvidence(receipt))
+        {
+            throw new BridgeUnavailableException(
+                "Project initialization cannot verify without durable prepared-file evidence");
+        }
+        using var destination = new FileStream(
+            receipt.DestinationPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.SequentialScan);
+        var actualBytes = checked((ulong)destination.Length);
+        var actualSha256 = Convert.ToHexStringLower(SHA256.HashData(destination));
+        if (actualBytes != receipt.PreparedFileBytes
+            || !ApplyRequestDigest.Matches(actualSha256, receipt.PreparedFileSha256))
+        {
+            throw new BridgeUnavailableException(
+                "Project initialization destination changed before receipt verification");
+        }
+        var verified = receipt with
+        {
+            Status = "verified",
+            AfterSnapshot = after,
+            FileSha256 = receipt.PreparedFileSha256,
+            FileBytes = receipt.PreparedFileBytes,
+            Error = null,
+        };
+        projectOperationStore.PutProjectInitialization(verified);
+        BridgeFaultInjection.ThrowIf("after_project_initialization_receipt");
+        return verified;
+    }
+
+    private static bool IsInitializedProjectSnapshot(
+        ProjectInitializationRequestDto request,
+        ProjectSnapshotDto snapshot,
+        string destinationPath) =>
+        PathsEqual(snapshot.ProjectPath, destinationPath)
+        && string.Equals(snapshot.ProjectId, request.PredictedProjectId, StringComparison.Ordinal)
+        && string.Equals(snapshot.SceneId, request.SourceSceneId, StringComparison.Ordinal)
+        && string.Equals(snapshot.Fingerprint, request.PredictedFingerprint, StringComparison.Ordinal);
+
+    private static bool HasCompletePreparedProjectInitializationEvidence(
+        ProjectInitializationReceiptDto receipt) =>
+        receipt.PreparedTemporaryPath is not null
+        && receipt.PreparedFileSha256 is not null
+        && receipt.PreparedFileBytes is > 0;
+
+    private sealed record ProjectInitializationFileEvidence(string Sha256, ulong Bytes);
+
+    private static ProjectInitializationFileEvidence ReadProjectInitializationFileEvidence(
+        string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.SequentialScan);
+        var bytes = checked((ulong)stream.Length);
+        var sha256 = Convert.ToHexStringLower(SHA256.HashData(stream));
+        if (bytes == 0)
+        {
+            throw new BridgeUnavailableException(
+                "Project initialization file is empty");
+        }
+        return new ProjectInitializationFileEvidence(sha256, bytes);
+    }
+
+    private static ProjectInitializationFileEvidence? TryReadProjectInitializationFileEvidence(
+        string path)
+    {
+        try
+        {
+            return ReadProjectInitializationFileEvidence(path);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static bool ProjectInitializationFileMatches(
+        string path,
+        string? expectedSha256,
+        ulong? expectedBytes)
+    {
+        if (expectedSha256 is null || expectedBytes is not > 0)
+        {
+            return false;
+        }
+        var evidence = TryReadProjectInitializationFileEvidence(path);
+        return evidence is not null
+            && evidence.Bytes == expectedBytes
+            && ApplyRequestDigest.Matches(evidence.Sha256, expectedSha256);
+    }
+
+    private static string AllocateProjectInitializationTemporaryPath(string destinationPath) =>
+        Path.Combine(
+            Path.GetDirectoryName(destinationPath)!,
+            $".takegraph-project-{Guid.NewGuid():N}.ymmp");
 
     private static void ValidateCheckpointRequest(CheckpointRequestDto request)
     {
@@ -3334,6 +4646,210 @@ internal sealed partial class Ymm4Facade
             await task.ConfigureAwait(false);
         }
         return (invocation.Scope, invocation.ProjectPath);
+    }
+
+    private static void SaveProjectDtoToTemporary(string destinationPath, string temporaryPath)
+    {
+        var main = RequireMainViewModel();
+        var model = GetField(main, "model")
+            ?? throw new BridgeUnavailableException("YMM4 MainViewModel.model is unavailable");
+        var scenes = GetMember(model, "Scenes")
+            ?? throw new BridgeUnavailableException("YMM4 project scenes are unavailable");
+        var timelines = GetMember(scenes, "Timelines") as IEnumerable
+            ?? throw new BridgeUnavailableException("YMM4 project timelines are unavailable");
+        var currentTimeline = GetMember(model, "Timeline")
+            ?? throw new BridgeUnavailableException("YMM4 current project timeline is unavailable");
+        var timelineValues = timelines.Cast<object>().ToArray();
+        var selectedIndex = Array.FindIndex(
+            timelineValues,
+            candidate => ReferenceEquals(candidate, currentTimeline) || Equals(candidate, currentTimeline));
+        if (selectedIndex < 0)
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 current timeline is absent from the project scene list");
+        }
+
+        var layoutService = GetField(model, "layoutService")
+            ?? throw new BridgeUnavailableException("YMM4 layout service is unavailable");
+        var tryGetLayout = layoutService.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method =>
+                method.Name == "TryGetLayoutXml"
+                && method.ReturnType == typeof(bool)
+                && method.GetParameters() is
+                [{ ParameterType: var parameterType, IsOut: true }]
+                && parameterType == typeof(string).MakeByRefType());
+        var layoutArguments = new object?[] { null };
+        var hasLayout = (bool)(tryGetLayout.Invoke(layoutService, layoutArguments) ?? false);
+        var layoutXml = hasLayout ? layoutArguments[0] as string : null;
+        var getToolStates = layoutService.GetType()
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "GetToolStates"
+                && method.GetParameters().Length == 0
+                && method.ReturnType.IsGenericType
+                && method.ReturnType.GetGenericTypeDefinition() == typeof(Dictionary<,>));
+        var toolStates = getToolStates.Invoke(layoutService, null)
+            ?? throw new BridgeUnavailableException("YMM4 tool-state snapshot is unavailable");
+
+        var projectType = main.GetType().Assembly.GetType("YukkuriMovieMaker.Project.Project")!;
+        var constructor = projectType.GetConstructors(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Single(candidate =>
+            {
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 5
+                    && parameters[0].ParameterType == typeof(int)
+                    && parameters[1].ParameterType == scenes.GetType()
+                    && parameters[2].ParameterType == typeof(string)
+                    && parameters[3].ParameterType == typeof(string)
+                    && parameters[4].ParameterType.IsInstanceOfType(toolStates);
+            });
+        object project;
+        try
+        {
+            project = constructor.Invoke(
+                [selectedIndex, scenes, destinationPath, layoutXml, toolStates]);
+        }
+        catch (TargetInvocationException error)
+        {
+            throw new BridgeUnavailableException(
+                $"YMM4 project save DTO construction failed: {(error.InnerException ?? error).Message}");
+        }
+
+        var jsonType = FindLoadedType("YukkuriMovieMaker.Json.Json")!;
+        var save = jsonType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(method =>
+            {
+                var parameters = method.GetParameters();
+                return method.Name == "Save"
+                    && method.IsGenericMethodDefinition
+                    && method.ReturnType == typeof(void)
+                    && parameters.Length == 3
+                    && parameters[1].ParameterType == typeof(string)
+                    && parameters[2].ParameterType.FullName
+                        == "Newtonsoft.Json.JsonSerializerSettings";
+            });
+        try
+        {
+            save.MakeGenericMethod(projectType).Invoke(null, [project, temporaryPath, null]);
+        }
+        catch (TargetInvocationException error)
+        {
+            throw new BridgeUnavailableException(
+                $"YMM4 project serialization failed: {(error.InnerException ?? error).Message}");
+        }
+    }
+
+    private static async Task ChangeActiveProjectPathAsync(string path, bool saved)
+    {
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+            ChangeActiveProjectPathCore(path, saved));
+    }
+
+    private static void ChangeActiveProjectPathCore(string path, bool saved)
+    {
+        var main = RequireMainViewModel();
+        var model = GetField(main, "model")
+            ?? throw new BridgeUnavailableException("YMM4 MainViewModel.model is unavailable");
+        var changePath = model.GetType().GetMethods(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Single(candidate =>
+                candidate.Name == "ChangeProjectPath"
+                && candidate.ReturnType == typeof(void)
+                && candidate.GetParameters() is [{ ParameterType: var parameterType }]
+                && parameterType == typeof(string));
+        try
+        {
+            changePath.Invoke(model, [path]);
+            if (saved)
+            {
+                var setSaved = model.GetType().GetMethods(
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Single(candidate =>
+                        candidate.Name == "set_IsProjectFileSaved"
+                        && !candidate.IsStatic
+                        && candidate.ReturnType == typeof(void)
+                        && candidate.GetParameters() is [{ ParameterType: var parameterType }]
+                        && parameterType == typeof(bool));
+                setSaved.Invoke(model, [true]);
+            }
+        }
+        catch (TargetInvocationException error)
+        {
+            throw error.InnerException ?? error;
+        }
+    }
+
+    internal static bool IsOwnedProjectInitializationTemporaryPath(
+        string destination,
+        string temporary)
+    {
+        try
+        {
+            var destinationFull = Path.GetFullPath(destination);
+            var temporaryFull = Path.GetFullPath(temporary);
+            if (!Path.IsPathFullyQualified(destination)
+                || !Path.IsPathFullyQualified(temporary)
+                || !string.Equals(temporary, temporaryFull, StringComparison.OrdinalIgnoreCase)
+                || PathsEqual(destinationFull, temporaryFull)
+                || !string.Equals(
+                    Path.GetDirectoryName(destinationFull),
+                    Path.GetDirectoryName(temporaryFull),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            var name = Path.GetFileName(temporaryFull);
+            const string prefix = ".takegraph-project-";
+            const string suffix = ".ymmp";
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            var token = name[prefix.Length..^suffix.Length];
+            return token.Length == 32 && token.All(Uri.IsHexDigit);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static void ClaimPreparedProjectInitializationPath(
+        string temporary,
+        string destination,
+        string expectedSha256,
+        ulong expectedBytes)
+    {
+        if (!IsOwnedProjectInitializationTemporaryPath(destination, temporary))
+        {
+            throw new InvalidDataException(
+                "Prepared project initialization file does not match its durable evidence");
+        }
+        // Deny writers while checking and atomically moving the exact file.
+        // Delete sharing is required for the rename while the handle remains
+        // open; the subsequent path commit independently locks the final path.
+        using var prepared = new FileStream(
+            temporary,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            4096,
+            FileOptions.SequentialScan);
+        var actualBytes = checked((ulong)prepared.Length);
+        var actualSha256 = Convert.ToHexStringLower(SHA256.HashData(prepared));
+        if (actualBytes != expectedBytes
+            || !ApplyRequestDigest.Matches(actualSha256, expectedSha256))
+        {
+            throw new InvalidDataException(
+                "Prepared project initialization file does not match its durable evidence");
+        }
+        File.Move(temporary, destination, overwrite: false);
+        if (!ProjectInitializationFileMatches(destination, expectedSha256, expectedBytes))
+        {
+            throw new BridgeUnavailableException(
+                "Claimed project initialization file does not match its durable evidence");
+        }
     }
 
     internal RenderProfilesDto RenderProfiles()
@@ -5290,6 +6806,7 @@ internal sealed partial class Ymm4Facade
                 continue;
             }
             var item = GetMember(wrapper, "Item") ?? wrapper;
+            var selectedValue = GetMember(wrapper, "IsSelected");
             result.Add(new RawItem(
                 item,
                 GetRequiredInt(item, wrapper, "Frame"),
@@ -5301,7 +6818,9 @@ internal sealed partial class Ymm4Facade
                 GetString(item, "Remark"),
                 GetString(item, "CharacterName"),
                 GetString(item, "Hatsuon", "Pronounce"),
-                item.GetType().FullName ?? item.GetType().Name));
+                item.GetType().FullName ?? item.GetType().Name,
+                selectedValue is bool selected && selected,
+                selectedValue is bool));
         }
         return result;
     }
@@ -5480,6 +6999,11 @@ internal sealed partial class Ymm4Facade
 
     private static uint FindFps(object main, object timeline)
     {
+        return FindExactFps(main, timeline) ?? 30;
+    }
+
+    private static uint? FindExactFps(object main, object timeline)
+    {
         foreach (var source in new[]
                  {
                      GetMember(main, "Project", "project", "_project"),
@@ -5501,7 +7025,7 @@ internal sealed partial class Ymm4Facade
                 }
             }
         }
-        return 30;
+        return null;
     }
 
     private static string Fingerprint(
@@ -5640,6 +7164,27 @@ internal sealed partial class Ymm4Facade
     {
         var version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString();
         return string.Equals(version, SupportedMutationYmm4Version, StringComparison.Ordinal);
+    }
+
+    private static bool IsSupportedObservationRuntime()
+    {
+        var entryAssembly = Assembly.GetEntryAssembly();
+        if (entryAssembly?.GetName().Name == "TakeGraph.Ymm4Bridge.Tests")
+        {
+            return true;
+        }
+        var version = entryAssembly?.GetName().Version?.ToString();
+        return string.Equals(version, SupportedMutationYmm4Version, StringComparison.Ordinal);
+    }
+
+    private static void ValidateObservationRuntime()
+    {
+        if (!IsSupportedObservationRuntime())
+        {
+            var actual = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "unknown";
+            throw new BridgeUnavailableException(
+                $"YMM4 {actual} current-frame composition is unsupported; verified only for {SupportedMutationYmm4Version}");
+        }
     }
 
     private static void ValidateMutationRuntime()
@@ -5800,6 +7345,27 @@ internal sealed partial class Ymm4Facade
         return start is TimeSpan startTime
             ? checked((int)Math.Round(startTime.TotalSeconds * fps))
             : null;
+    }
+
+    /// Reads only a directly exposed playhead/frame value. Composition
+    /// observation must not estimate a frame from progress or timeline length,
+    /// because that could select the wrong active elements while still matching
+    /// the scene fingerprint.
+    internal static int? ReadExactPreviewFrame(object preview, uint fps)
+    {
+        foreach (var name in new[] { "CurrentFrame", "Frame", "Position" })
+        {
+            var value = GetMember(preview, name);
+            if (value is TimeSpan time)
+            {
+                return checked((int)Math.Round(time.TotalSeconds * fps));
+            }
+            if (value is not null && int.TryParse(value.ToString(), out var frame) && frame >= 0)
+            {
+                return frame;
+            }
+        }
+        return null;
     }
 
     private static bool ReadProjectDirty()
@@ -6415,7 +7981,7 @@ internal sealed partial class Ymm4Facade
         return Convert.ChangeType(value, effectiveType);
     }
 
-    private sealed record RawItem(
+    internal sealed record RawItem(
         object Item,
         int Frame,
         int Layer,
@@ -6426,7 +7992,9 @@ internal sealed partial class Ymm4Facade
         string Remark,
         string CharacterName,
         string SpokenText,
-        string TypeName);
+        string TypeName,
+        bool Selected,
+        bool SelectionAvailable);
 
     private sealed record AppliedBatch(
         object Timeline,
@@ -6441,7 +8009,8 @@ internal sealed partial class Ymm4Facade
         object decorations,
         IReadOnlyList<NativeVoiceCueDto> cues,
         IReadOnlyDictionary<Guid, object> characters,
-        HashSet<object> knownItems)
+        HashSet<object> knownItems,
+        List<object>? addedItems = null)
     {
         internal object MainModel { get; } = mainModel;
         internal object TimelineViewModel { get; } = timelineViewModel;
@@ -6451,7 +8020,7 @@ internal sealed partial class Ymm4Facade
         internal IReadOnlyList<NativeVoiceCueDto> Cues { get; } = cues;
         internal IReadOnlyDictionary<Guid, object> Characters { get; } = characters;
         internal HashSet<object> KnownItems { get; } = knownItems;
-        internal List<object> AddedItems { get; } = [];
+        internal List<object> AddedItems { get; } = addedItems ?? [];
     }
 
     private sealed class NativeVoiceMutationPreparation(
