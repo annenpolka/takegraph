@@ -316,6 +316,75 @@ export function formatDescriptorInventoryText(result: unknown): string {
   return lines.join("\n");
 }
 
+export function formatCompositionText(input: unknown): string {
+  const root = asRecord(input);
+  const source = asRecord(root.source);
+  const elements = asArray(root.elements);
+  const unavailable = asArray(root.unavailableFields).filter(
+    (value): value is string => typeof value === "string",
+  );
+  const lines = [
+    "Scene composition observation.",
+    line("store", STORE_CANONICAL),
+    line("observationStatus", str(root.observationStatus)),
+    line("completeness", str(root.completeness)),
+    line("evaluatedFrame", num(root.evaluatedFrame) ?? num(root.frame)),
+    line("projectId", str(root.projectId) ?? str(source.projectId)),
+    line("sceneId", str(root.sceneId) ?? str(source.sceneId)),
+    line("fps", num(root.fps) ?? num(source.fps)),
+    line("fingerprint", str(root.sourceFingerprint) ?? str(source.fingerprint)),
+    line("elementCount", elements.length),
+    ...elements.slice(0, 32).map((element) => formatCompositionElementLine(element)),
+  ];
+  if (unavailable.length > 0) {
+    lines.push(`unavailableFields: ${unavailable.join(", ")}`);
+  }
+  if (str(root.observationError)) {
+    lines.push(`blocked: ${str(root.observationError)}`);
+  }
+  lines.push(
+    line(
+      "next",
+      "takegraph_inspect with view=scene after edits; PNG review stays on kind=scene_inspection",
+    ),
+  );
+  return lines.join("\n");
+}
+
+function formatCompositionElementLine(item: unknown): string {
+  const record = asRecord(item);
+  const elementId = str(record.elementId) ?? "(unknown)";
+  const kind = str(record.kind) ?? str(record.type) ?? "item";
+  const text = str(record.text) ?? str(record.caption) ?? "";
+  const speaker = str(record.speaker) ?? str(record.characterName) ?? "";
+  return `- ${elementId} kind=${kind} speaker=${speaker || "(none)"} text=${text || "(none)"} frame=${num(record.frame) ?? "?"} layer=${num(record.layer) ?? "?"}`;
+}
+
+export function formatTaskListText(
+  tasks: Array<{
+    taskId?: string;
+    kind?: string;
+    phase?: string;
+    planDigest?: string | null;
+    availableActions?: string[];
+  }>,
+): string {
+  const lines = [
+    `${tasks.length} facade task envelope(s) cached.`,
+    line("store", "facade-cache"),
+  ];
+  if (tasks.length === 0) {
+    lines.push("- (none)");
+  }
+  for (const task of tasks) {
+    lines.push(
+      `- ${task.taskId ?? "(unknown)"} kind=${task.kind ?? "?"} phase=${task.phase ?? "?"} planDigest=${task.planDigest ?? "(none)"} actions=${(task.availableActions ?? []).join(",") || "(none)"}`,
+    );
+  }
+  lines.push(line("next", "takegraph_inspect with view=task and the opaque taskId"));
+  return lines.join("\n");
+}
+
 export function formatRenderProfilesText(result: unknown): string {
   const root = asRecord(result);
   const profiles = asArray(root.profiles);

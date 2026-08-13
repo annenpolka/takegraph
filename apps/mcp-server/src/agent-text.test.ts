@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatAgentError,
+  formatCompositionText,
   formatDescriptorInventoryText,
   formatRenderProfilesText,
   formatStagedTaskReport,
@@ -112,6 +113,34 @@ test("descriptor inventory prints bindable IDs not only display names", () => {
   assert.match(text, /春日部つむぎ/);
   assert.match(text, /expectedConfigDigest|configDigest=aa/);
   assert.match(text, /ymm4_native_extension_stage/);
+});
+
+test("composition report lists observed elements without inventing geometry", () => {
+  const text = formatCompositionText({
+    observationStatus: "source_bound",
+    completeness: "partial",
+    evaluatedFrame: 120,
+    projectId: "proj-1",
+    sceneId: "scene-1",
+    fps: 60,
+    sourceFingerprint: "fp",
+    elements: [
+      {
+        elementId: "sample-reimu-01",
+        kind: "voice",
+        speaker: "ゆっくり霊夢",
+        text: "こんにちは",
+        frame: 60,
+        layer: 2,
+      },
+    ],
+    unavailableFields: ["viewport.width"],
+  });
+  assert.match(text, /sample-reimu-01/);
+  assert.match(text, /ゆっくり霊夢/);
+  assert.match(text, /evaluatedFrame: 120/);
+  assert.match(text, /unavailableFields: viewport.width/);
+  assert.match(text, /kind=scene_inspection/);
 });
 
 test("render profile report blocks staging when nothing is bindable", () => {

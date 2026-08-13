@@ -547,13 +547,23 @@ internal sealed partial class Ymm4Facade
             {
                 throw new BridgeValidationException("Portable audio artifact binding is invalid");
             }
-            var portableAudioPathField = timelineEdit ? "audio_path" : "audioPath";
-            var portableArtifactField = timelineEdit ? "artifact_digest" : "artifactDigest";
-            RequireExactJsonProperties(
+            RequireAllowedJsonProperties(
                 resolved,
                 "kind",
-                portableAudioPathField,
-                portableArtifactField);
+                "audio_path",
+                "audioPath",
+                "artifact_digest",
+                "artifactDigest");
+            var portableAudioPathField = RequireOneJsonAlias(
+                resolved,
+                "portable audio path",
+                "audio_path",
+                "audioPath");
+            var portableArtifactField = RequireOneJsonAlias(
+                resolved,
+                "portable artifact digest",
+                "artifact_digest",
+                "artifactDigest");
             var audioPath = RequireJsonString(resolved, portableAudioPathField);
             if (RequireJsonString(resolved, "kind") != "portable_pair"
                 || !ApplyRequestDigest.Matches(
@@ -589,12 +599,16 @@ internal sealed partial class Ymm4Facade
             throw new BridgeValidationException(
                 "Native-voice strategy, text, action, or placement is inconsistent");
         }
-        var nativeMaxFramesField = timelineEdit ? "max_frames" : "maxFrames";
-        RequireExactJsonProperties(duration, "kind", nativeMaxFramesField);
+        RequireAllowedJsonProperties(duration, "kind", "max_frames", "maxFrames");
         if (RequireJsonString(duration, "kind") != "bounded")
         {
             throw new BridgeValidationException("Native-voice duration must be bounded");
         }
+        var nativeMaxFramesField = RequireOneJsonAlias(
+            duration,
+            "native duration bound",
+            "max_frames",
+            "maxFrames");
         var maxLength = RequirePositiveJsonInt(duration, nativeMaxFramesField);
         ValidateOwnership(ownership, portableStrategy: false);
         if (bindings.Length != 1)
@@ -618,15 +632,23 @@ internal sealed partial class Ymm4Facade
         {
             throw new BridgeValidationException("Native character binding is invalid");
         }
-        var nativeCharacterField = timelineEdit ? "character_name" : "characterName";
-        var nativeBindingField = timelineEdit
-            ? "character_binding_digest"
-            : "characterBindingDigest";
-        RequireExactJsonProperties(
+        RequireAllowedJsonProperties(
             resolved,
             "kind",
-            nativeCharacterField,
-            nativeBindingField);
+            "character_name",
+            "characterName",
+            "character_binding_digest",
+            "characterBindingDigest");
+        var nativeCharacterField = RequireOneJsonAlias(
+            resolved,
+            "native character field",
+            "character_name",
+            "characterName");
+        var nativeBindingField = RequireOneJsonAlias(
+            resolved,
+            "native binding digest field",
+            "character_binding_digest",
+            "characterBindingDigest");
         if (RequireJsonString(resolved, "kind") != "native_voice"
             || RequireJsonString(resolved, nativeCharacterField) != characterName
             || !ApplyRequestDigest.Matches(

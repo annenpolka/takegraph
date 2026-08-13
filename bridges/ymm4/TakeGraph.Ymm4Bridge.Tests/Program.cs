@@ -524,6 +524,20 @@ static void UnifiedTargetPlanCueIsSealed()
     {
         Ymm4Facade.ValidateTargetPlanCueContract(document.RootElement);
     }
+    var rustNativeCue = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+    var rustDuration = rustNativeCue["duration"]!.AsObject();
+    rustDuration["max_frames"] = rustDuration["maxFrames"]!.GetValue<int>();
+    rustDuration.Remove("maxFrames");
+    var rustResolved = rustNativeCue["resolvedRealization"]!.AsObject();
+    rustResolved["character_name"] = rustResolved["characterName"]!.GetValue<string>();
+    rustResolved["character_binding_digest"] =
+        rustResolved["characterBindingDigest"]!.GetValue<string>();
+    rustResolved.Remove("characterName");
+    rustResolved.Remove("characterBindingDigest");
+    using (var rustDocument = JsonDocument.Parse(rustNativeCue.ToJsonString()))
+    {
+        Ymm4Facade.ValidateTargetPlanCueContract(rustDocument.RootElement);
+    }
     var timelineNativeCue = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
     timelineNativeCue["capabilityDependencies"]!.AsArray().Add(
         JsonSerializer.SerializeToNode(Dependency("timelineEdit.apply")));
