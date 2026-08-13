@@ -761,6 +761,7 @@ module ymm4LifecycleProtocol {
     nativeUndoCount: int,
     unmanagedState: int,
     unmanagedEditCount: int,
+    hasExistingPath: bool,
   }
 
   type CheckpointTask = {
@@ -873,6 +874,7 @@ module ymm4LifecycleProtocol {
       nativeUndoCount: 0,
       unmanagedState: 100,
       unmanagedEditCount: 0,
+      hasExistingPath: false,
     },
     checkpoint' = {
       status: CheckpointIdle,
@@ -925,6 +927,7 @@ module ymm4LifecycleProtocol {
 
   action beginApply = all {
     core.applyStatus == ApplyIdle,
+    core.hasExistingPath,
     core.actualManagedChanges == 0,
     core.approvedChangeBudget > 0,
     checkpoint.status != CheckpointSaving,
@@ -1115,6 +1118,7 @@ module ymm4LifecycleProtocol {
 
   action beginCheckpoint = all {
     projectStateIsUnambiguous(core.applyStatus),
+    core.hasExistingPath,
     not(checkpoint.status == CheckpointSaving),
     inspection.status != InspectionCapturing,
     render.status != RenderRunning,
@@ -1348,6 +1352,43 @@ module ymm4LifecycleProtocol {
     render' = render,
   }
 
+  // An operator may release the write gate without claiming rollback
+  // succeeded. Leftover target items become unmanaged drift.
+  action gainExistingPath = all {
+    not(core.hasExistingPath),
+    core' = core.with("hasExistingPath", true),
+    checkpoint' = checkpoint,
+    inspection' = inspection,
+    render' = render,
+  }
+
+  action loseExistingPath = all {
+    any {
+      core.applyStatus == ApplyIdle,
+      core.applyStatus == ApplyRolledBack,
+    },
+    core.hasExistingPath,
+    core' = core.with("hasExistingPath", false),
+    checkpoint' = invalidateCheckpoint(checkpoint),
+    inspection' = inspection,
+    render' = render,
+  }
+
+  action acknowledgeRecoveryRequired = all {
+    core.applyStatus == ApplyRecoveryRequired,
+    core.recoveryRequiredObserved,
+    core' = core
+      .with("applyStatus", ApplyIdle)
+      .with("actualManagedChanges", 0)
+      .with("walPrepared", false)
+      .with("readbackDurable", false)
+      .with("rollbackFailed", false)
+      .with("recoveryRequiredObserved", false),
+    checkpoint' = checkpoint,
+    inspection' = inspection,
+    render' = render,
+  }
+
   action step = any {
     approveOneChangeBudget,
     approveTwoChangeBudget,
@@ -1387,6 +1428,9 @@ module ymm4LifecycleProtocol {
     failRenderRecovery,
     changeRenderProfile,
     recoveryRequiredStutter,
+    gainExistingPath,
+    loseExistingPath,
+    acknowledgeRecoveryRequired,
   }
 
   val recoveryRequiredHasDurableCause =
@@ -1477,6 +1521,16 @@ module ymm4LifecycleProtocol {
   val tier2TasksDoNotAdvanceRevision =
     core.headRevision == core.committedApplyCount
 
+  val applyAndCheckpointRequireExistingPath =
+    not(any {
+      applyOwnsProjectGate(core.applyStatus),
+      core.applyStatus == ApplyVerified,
+      core.applyStatus == ApplyCommitted,
+      checkpoint.status == CheckpointSaving,
+      checkpoint.status == CheckpointVerified,
+    })
+      or core.hasExistingPath
+
   val projectOperationGateIsExclusive =
     not(any {
       and {
@@ -1518,6 +1572,7 @@ module ymm4LifecycleProtocol {
     nonSuccessfulRenderRestoresOriginal,
     tier2TasksDoNotAdvanceRevision,
     projectOperationGateIsExclusive,
+    applyAndCheckpointRequireExistingPath,
   }
 
   // Witnesses make the important failure and independent-lifecycle paths
@@ -1962,6 +2017,7 @@ module ymm4ExternalMutationFenceProtocol {
     rollbackProofOwner: int,
     notStartedProofOwner: int,
     lastAbortOwner: int,
+    operatorAckProofOwner: int,
   }
 
   var fence: FenceState
@@ -1983,6 +2039,7 @@ module ymm4ExternalMutationFenceProtocol {
     rollbackProofOwner: 0,
     notStartedProofOwner: 0,
     lastAbortOwner: 0,
+    operatorAckProofOwner: 0,
   }
 
   action reserveOne = all {
@@ -1999,7 +2056,8 @@ module ymm4ExternalMutationFenceProtocol {
       .with("durableReadbackOwner", 0)
       .with("rollbackProofOwner", 0)
       .with("notStartedProofOwner", 0)
-      .with("lastAbortOwner", 0),
+      .with("lastAbortOwner", 0)
+      .with("operatorAckProofOwner", if (fence.operatorAckProofOwner == 1) 0 else fence.operatorAckProofOwner),
   }
 
   action reserveTwo = all {
@@ -2016,7 +2074,8 @@ module ymm4ExternalMutationFenceProtocol {
       .with("durableReadbackOwner", 0)
       .with("rollbackProofOwner", 0)
       .with("notStartedProofOwner", 0)
-      .with("lastAbortOwner", 0),
+      .with("lastAbortOwner", 0)
+      .with("operatorAckProofOwner", if (fence.operatorAckProofOwner == 2) 0 else fence.operatorAckProofOwner),
   }
 
   action mutateOne = all {
@@ -2339,6 +2398,40 @@ module ymm4ExternalMutationFenceProtocol {
       .with("lastAbortOwner", 2),
   }
 
+  // An operator may release an unresolved reservation without claiming
+  // rollback, verification, or a canonical commit. Leftover target items
+  // become unmanaged drift. This is not lastAbortOwner: successful
+  // durable read-back still cannot roll back.
+  action acknowledgeRecoveryRequiredOne = all {
+    any {
+      fence.phase == FenceAmbiguous,
+      fence.phase == FenceRecoveryRequired,
+    },
+    fence.reservationOwner == 1,
+    fence.reservationEvidence == 101,
+    fence' = fence
+      .with("phase", FenceIdle)
+      .with("lockOwner", 0)
+      .with("reservationOwner", 0)
+      .with("reservationEvidence", 0)
+      .with("operatorAckProofOwner", 1),
+  }
+
+  action acknowledgeRecoveryRequiredTwo = all {
+    any {
+      fence.phase == FenceAmbiguous,
+      fence.phase == FenceRecoveryRequired,
+    },
+    fence.reservationOwner == 2,
+    fence.reservationEvidence == 202,
+    fence' = fence
+      .with("phase", FenceIdle)
+      .with("lockOwner", 0)
+      .with("reservationOwner", 0)
+      .with("reservationEvidence", 0)
+      .with("operatorAckProofOwner", 2),
+  }
+
   action stutter = fence' = fence
 
   action step = any {
@@ -2371,6 +2464,8 @@ module ymm4ExternalMutationFenceProtocol {
     sealNotStartedTwo,
     abortOne,
     abortTwo,
+    acknowledgeRecoveryRequiredOne,
+    acknowledgeRecoveryRequiredTwo,
     stutter,
   }
 
@@ -2386,6 +2481,7 @@ module ymm4ExternalMutationFenceProtocol {
     fence.mutationCountOne == 0
       or fence.committedEvidenceOne == 101
       or fence.lastAbortOwner == 1
+      or fence.operatorAckProofOwner == 1
       or and {
         fence.reservationOwner == 1,
         fence.reservationEvidence == 101,
@@ -2393,6 +2489,7 @@ module ymm4ExternalMutationFenceProtocol {
     fence.mutationCountTwo == 0
       or fence.committedEvidenceTwo == 202
       or fence.lastAbortOwner == 2
+      or fence.operatorAckProofOwner == 2
       or and {
         fence.reservationOwner == 2,
         fence.reservationEvidence == 202,
@@ -2471,6 +2568,14 @@ module ymm4ExternalMutationFenceProtocol {
         },
       }
 
+  val operatorAckDoesNotKeepOwnReservation =
+    fence.operatorAckProofOwner == 0
+      or fence.reservationOwner != fence.operatorAckProofOwner
+
+  val operatorAckIsNotRollback =
+    fence.operatorAckProofOwner == 0
+      or fence.lastAbortOwner != fence.operatorAckProofOwner
+
   val externalMutationFenceSafety = and {
     mutationRequiresExactReservation,
     externalReservationIsExclusive,
@@ -2480,5 +2585,7 @@ module ymm4ExternalMutationFenceProtocol {
     notStartedTombstonePreventsMutation,
     durableSuccessfulReadbackCannotRollBack,
     unresolvedDurableReadbackRetainsReservation,
+    operatorAckDoesNotKeepOwnReservation,
+    operatorAckIsNotRollback,
   }
 }
