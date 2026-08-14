@@ -16,6 +16,13 @@
 - Do not hand-edit files under `generated/`; generation will own them once the runner is implemented.
 - Never describe a green Quint model as proof of UI, media, network, or operating-system behavior.
 
+## Agent usage skill
+
+- Any agent operating the TakeGraph MCP tools must follow `.agents/skills/takegraph/SKILL.md`.
+- Update that file in the same change when you add or rename a task kind, inspect view, store, digest rule, typical `availableActions` sequence, or a worked payload field.
+- Keep live contract wording in `TAKEGRAPH_AGENT_GUIDE`; the skill holds recipes and fail-closed stops, not a second copy of the guide.
+- `apps/mcp-server` tests fail if a `TASK_KINDS` value is missing from the skill.
+
 ## Boundaries
 
 - `crates/takegraph-core`: domain state and pure transitions.
@@ -23,5 +30,6 @@
 - `crates/takegraph-node`: media execution and provider adapters.
 - `apps/studio-view`: portable MCP App UI behind `StudioHostBridge`.
 - `apps/mcp-server`: MCP tools, resources, and view registration.
+- `.agents/skills/takegraph`: agent-facing MCP usage skill (cross-client auto-discovery).
 - `specs`: executable state-machine specifications.
 

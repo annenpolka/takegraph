@@ -185,3 +185,15 @@ When a change affects allowed operation order, concurrency, retry, cancellation,
 5. run `pnpm verify`.
 
 UI layout, codecs, visual quality, platform APIs, and network wiring remain integration, E2E, or manual boundaries; Quint does not prove them.
+
+## Agent usage skill
+
+`.agents/skills/takegraph/SKILL.md` is the checked-in operator prompt for
+`takegraph_inspect`, `takegraph_task_stage`, `takegraph_task_approve`,
+`takegraph_task_execute`, and `takegraph_task_decide`.
+
+When a change adds or renames a `TASK_KINDS` value, inspect view, store,
+digest rule, typical `availableActions` sequence, or a worked payload field,
+update that skill in the same change. `pnpm --filter @takegraph/mcp-server test`
+fails if a kind is missing from the file. Change `TAKEGRAPH_AGENT_GUIDE` first
+for the live inspect-overview contract; then adjust the skill recipes.
