@@ -57,6 +57,16 @@ export interface RegisterFacadeToolsOptions {
   resourceUri: string;
 }
 
+export const INSPECT_VIEWS = [
+  "overview",
+  "studio",
+  "canonical",
+  "scene",
+  "catalog",
+  "tasks",
+  "task",
+] as const;
+
 /**
  * Process-local presentation cache for the uniform facade contract.
  *
@@ -2359,9 +2369,7 @@ export function registerFacadeTools(
       description:
         "Read one uniform view of the studio session, canonical YMM4 project, task lifecycle, catalogs, or partial scene composition. This never stages or mutates a project.",
       inputSchema: {
-        view: z
-          .enum(["overview", "studio", "canonical", "scene", "catalog", "tasks", "task"])
-          .default("overview"),
+        view: z.enum(INSPECT_VIEWS).default("overview"),
         taskId: z.string().min(1).optional(),
         include: z.array(z.enum(["composition"])).default([]),
       },

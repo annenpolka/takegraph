@@ -4,6 +4,10 @@
  * Native workflow identifiers remain internal to their owning store. A task ID
  * only adds an allowlisted kind so the facade can route an opaque native ID
  * without guessing its workflow from payload details.
+ *
+ * Adding or renaming a kind also requires updating
+ * `.agents/skills/takegraph/SKILL.md`. `agent-skill.test.ts` fails if a
+ * `TASK_KINDS` value is missing from that file.
  */
 export const TASK_KINDS = [
   "studio_take",

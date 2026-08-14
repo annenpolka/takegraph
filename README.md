@@ -50,7 +50,9 @@ model-facing surface is deliberately limited to five task-oriented tools:
 `takegraph_task_execute`, and `takegraph_task_decide`. Studio gesture tools stay
 app-only. Every staged operation returns a common task envelope so callers can
 follow `taskId`, digests, phase, and `availableActions` instead of selecting
-among route-specific tool families.
+among route-specific tool families. The checked-in operator skill at
+`.agents/skills/takegraph/SKILL.md` is the agent-facing recipe for that surface;
+keep it in the same change as facade or guide edits.
 
 Project initialization uses that same five-tool surface. Stage
 `kind: "project_initialization"` with `mode: "adopt_active"` for an already
@@ -211,6 +213,7 @@ specs/               Quint semantic specifications
 generated/           future immutable verification outputs
 toolchain/           semantic toolchain lock
 docs/                architecture and development notes
+.agents/skills/      agent-facing MCP usage skill (auto-discovered)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and [docs/development.md](docs/development.md) for the local workflow.

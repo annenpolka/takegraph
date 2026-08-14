@@ -3,6 +3,7 @@ import type { ProjectState, StagedPatchSummary } from "./project-session.js";
 export const STORE_STUDIO = "studio-session";
 export const STORE_CANONICAL = "canonical-project";
 
+/** Live inspect-overview contract. Operator recipes live in `.agents/skills/takegraph/SKILL.md`. */
 export const TAKEGRAPH_AGENT_GUIDE = [
   "TakeGraph MCP guide",
   "Two stores:",
