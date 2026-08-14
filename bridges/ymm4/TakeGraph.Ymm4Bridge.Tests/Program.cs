@@ -43,6 +43,8 @@ var tests = new (string Name, Action Run)[]
     ("required reflected timeline fields fail closed", RequiredReflectionFailsClosed),
     ("locked mutation targets map to conflict", LockedMutationTargetsMapToConflict),
     ("request JSON boundary is strict and maps to 400", StrictRequestJsonMapsTo400),
+    ("submitted HTTP responses are not rewritten", SubmittedHttpResponsesAreNotRewritten),
+    ("preview settle accepts the requested frame", PreviewSettleAcceptsRequestedFrame),
     ("native-extension inner JSON is exact", NativeExtensionInnerJsonIsExact),
     ("scene capture combines capture and restoration failures", SceneCaptureFailureIsCombined),
     ("portable descriptor digests bind exact configuration", PortableDescriptorDigestsBindConfiguration),
@@ -2522,6 +2524,38 @@ static void NativeExtensionInnerJsonIsExact()
         _ = CaptureBridgeValidation(
             () => Ymm4Facade.RequireExactJsonProperties(document.RootElement, "type"));
     }
+}
+
+static void SubmittedHttpResponsesAreNotRewritten()
+{
+    var submitted = new InvalidOperationException(
+        "This operation cannot be performed after the response has been submitted.");
+    Assert(BridgeHost.IsResponseAlreadySubmitted(submitted),
+        "HttpListener already-submitted error was treated as a writable 500");
+    Assert(
+        BridgeHost.IsResponseAlreadySubmitted(
+            new InvalidOperationException("outer", submitted)),
+        "wrapped already-submitted error was treated as a writable 500");
+    Assert(BridgeHost.IsResponseAlreadySubmitted(new ObjectDisposedException("response")),
+        "disposed listener response was treated as a writable 500");
+    Assert(BridgeHost.IsResponseAlreadySubmitted(new IOException("connection reset")),
+        "dropped client write was treated as a writable 500");
+    Assert(
+        !BridgeHost.IsResponseAlreadySubmitted(
+            new InvalidOperationException("YMM4 preview seek did not settle at frame 1080")),
+        "unrelated invalid-operation errors were swallowed as already-submitted");
+}
+
+static void PreviewSettleAcceptsRequestedFrame()
+{
+    Assert(Ymm4Facade.PreviewFrameSettled(1080, 1080),
+        "exact preview frame was rejected as unsettled");
+    Assert(Ymm4Facade.PreviewFrameSettled(1079, 1080),
+        "one-frame preview lag was rejected as unsettled");
+    Assert(!Ymm4Facade.PreviewFrameSettled(60, 1080),
+        "stale playhead was treated as settled");
+    Assert(!Ymm4Facade.PreviewFrameSettled(null, 1080),
+        "unreadable playhead was treated as settled");
 }
 
 static void SceneCaptureFailureIsCombined()

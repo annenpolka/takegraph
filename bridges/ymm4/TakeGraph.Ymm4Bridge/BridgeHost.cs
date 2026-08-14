@@ -78,7 +78,21 @@ internal sealed class BridgeHost : IDisposable
             try
             {
                 var context = await listener.GetContextAsync().WaitAsync(cancellationToken);
-                _ = Task.Run(() => HandleAsync(context), cancellationToken);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await HandleAsync(context).ConfigureAwait(false);
+                    }
+                    catch (Exception error) when (IsResponseAlreadySubmitted(error))
+                    {
+                        AbortResponse(context.Response);
+                    }
+                    catch
+                    {
+                        AbortResponse(context.Response);
+                    }
+                }, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -378,8 +392,19 @@ internal sealed class BridgeHost : IDisposable
         }
         catch (Exception error)
         {
-            var mapped = MapError(error);
-            await WriteJsonAsync(context.Response, mapped.StatusCode, mapped.Error);
+            try
+            {
+                var mapped = MapError(error);
+                await WriteJsonAsync(context.Response, mapped.StatusCode, mapped.Error);
+            }
+            catch (Exception writeError) when (IsResponseAlreadySubmitted(writeError))
+            {
+                AbortResponse(context.Response);
+            }
+            catch
+            {
+                AbortResponse(context.Response);
+            }
         }
     }
 
@@ -481,19 +506,57 @@ internal sealed class BridgeHost : IDisposable
         }
     }
 
+    internal static bool IsResponseAlreadySubmitted(Exception error)
+    {
+        for (var current = error; current is not null; current = current.InnerException)
+        {
+            if (current is ObjectDisposedException or HttpListenerException or IOException)
+            {
+                return true;
+            }
+            if (current is InvalidOperationException
+                && current.Message.Contains(
+                    "response has been submitted",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static async Task WriteJsonAsync(HttpListenerResponse response, int status, object value)
     {
-        if (response.OutputStream is null)
+        try
         {
-            return;
+            if (response.OutputStream is null)
+            {
+                return;
+            }
+            response.StatusCode = status;
+            response.ContentType = "application/json; charset=utf-8";
+            response.Headers["Cache-Control"] = "no-store";
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(value, BridgeJson.Options);
+            response.ContentLength64 = bytes.Length;
+            await response.OutputStream.WriteAsync(bytes);
+            response.Close();
         }
-        response.StatusCode = status;
-        response.ContentType = "application/json; charset=utf-8";
-        response.Headers["Cache-Control"] = "no-store";
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, BridgeJson.Options);
-        response.ContentLength64 = bytes.Length;
-        await response.OutputStream.WriteAsync(bytes);
-        response.Close();
+        catch (Exception error) when (IsResponseAlreadySubmitted(error))
+        {
+            AbortResponse(response);
+        }
+    }
+
+    private static void AbortResponse(HttpListenerResponse response)
+    {
+        try
+        {
+            response.Abort();
+        }
+        catch
+        {
+            // The client already finished or dropped the connection.
+        }
     }
 
     private static bool CryptographicEquals(string? provided, string expected)

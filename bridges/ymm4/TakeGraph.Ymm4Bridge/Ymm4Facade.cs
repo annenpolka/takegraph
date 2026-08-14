@@ -2792,16 +2792,18 @@ internal sealed partial class Ymm4Facade
                 for (var index = 0; index < request.Frames.Count; index++)
                 {
                     var requestedFrame = request.Frames[index];
-                    await SeekPreviewToFrameAsync(preview, requestedFrame, before.Fps).ConfigureAwait(false);
-                    await Task.Delay(120).ConfigureAwait(false);
-                    var actualFrame = await Application.Current.Dispatcher.InvokeAsync(
-                        () => ReadPreviewFrame(preview, before.Fps));
-                    if (actualFrame is null || Math.Abs(actualFrame.Value - requestedFrame) > 1)
+                    var actualFrame = await WaitForPreviewFrameAsync(
+                            preview,
+                            requestedFrame,
+                            before.Fps)
+                        .ConfigureAwait(false);
+                    if (!PreviewFrameSettled(actualFrame, requestedFrame) || actualFrame is null)
                     {
                         throw new BridgeUnavailableException(
                             $"YMM4 preview seek did not settle at frame {requestedFrame}");
                     }
 
+                    var settledFrame = actualFrame.Value;
                     var temporaryPath = Path.Combine(
                         operationDirectory,
                         $"frame-{index:D3}-{requestedFrame}.tmp-{Guid.NewGuid():N}.png");
@@ -2815,7 +2817,7 @@ internal sealed partial class Ymm4Facade
                     File.Move(temporaryPath, finalPath, overwrite: true);
                     captures.Add(new SceneCaptureFrameDto(
                         requestedFrame,
-                        actualFrame.Value,
+                        settledFrame,
                         finalPath,
                         hash,
                         width,
@@ -2828,24 +2830,33 @@ internal sealed partial class Ymm4Facade
                 captureError = error;
             }
             Exception? restoreError = null;
+            int? restoredFrame = null;
             try
             {
-                await SeekPreviewToFrameAsync(preview, originalFrame.Value, before.Fps)
+                restoredFrame = await WaitForPreviewFrameAsync(
+                        preview,
+                        originalFrame.Value,
+                        before.Fps)
                     .ConfigureAwait(false);
+                if (!PreviewFrameSettled(restoredFrame, originalFrame.Value))
+                {
+                    restoreError = new BridgeUnavailableException(
+                        $"YMM4 preview seek did not settle at frame {originalFrame.Value}");
+                }
             }
             catch (Exception error)
             {
                 restoreError = error;
             }
 
-            int? restoredFrame = null;
             var dirtyAfter = dirtyBefore;
             string? selectionAfter = null;
             Exception? restorationReadbackError = null;
             try
             {
-                restoredFrame = await Application.Current.Dispatcher.InvokeAsync(
-                    () => ReadPreviewFrame(preview, before.Fps));
+                restoredFrame ??= await Application.Current.Dispatcher.InvokeAsync(
+                    () => ReadExactPreviewFrame(preview, before.Fps)
+                        ?? ReadPreviewFrame(preview, before.Fps));
                 dirtyAfter = await Application.Current.Dispatcher.InvokeAsync(ReadProjectDirty);
                 selectionAfter = await Application.Current.Dispatcher.InvokeAsync(ReadSelectionDigest);
             }
@@ -2855,8 +2866,7 @@ internal sealed partial class Ymm4Facade
             }
             var transientStateRestored = restoreError is null
                 && restorationReadbackError is null
-                && restoredFrame is not null
-                && Math.Abs(restoredFrame.Value - originalFrame.Value) <= 1
+                && PreviewFrameSettled(restoredFrame, originalFrame.Value)
                 && string.Equals(selectionBefore, selectionAfter, StringComparison.Ordinal);
             var dirtyStateRestored = restorationReadbackError is null
                 && dirtyAfter == dirtyBefore;
@@ -7469,6 +7479,31 @@ internal sealed partial class Ymm4Facade
                 .Append('\n');
         }
         return Hash(canonical.ToString());
+    }
+
+    internal static bool PreviewFrameSettled(int? actualFrame, int requestedFrame)
+    {
+        return actualFrame is int frame && Math.Abs(frame - requestedFrame) <= 1;
+    }
+
+    private async Task<int?> WaitForPreviewFrameAsync(object preview, int requestedFrame, uint fps)
+    {
+        int? actualFrame = null;
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            if (attempt % 10 == 0)
+            {
+                await SeekPreviewToFrameAsync(preview, requestedFrame, fps).ConfigureAwait(false);
+            }
+            await Task.Delay(50).ConfigureAwait(false);
+            actualFrame = await Application.Current.Dispatcher.InvokeAsync(
+                () => ReadExactPreviewFrame(preview, fps) ?? ReadPreviewFrame(preview, fps));
+            if (PreviewFrameSettled(actualFrame, requestedFrame))
+            {
+                return actualFrame;
+            }
+        }
+        return actualFrame;
     }
 
     private static async Task SeekPreviewToFrameAsync(object preview, int frame, uint fps)
