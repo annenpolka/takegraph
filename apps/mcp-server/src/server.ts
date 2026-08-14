@@ -355,7 +355,13 @@ const nativeVoiceMutationWriteFields = {
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   characterName: z.string().min(1),
   displayText: z.string().min(1),
-  spokenText: z.string().min(1),
+  spokenText: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional approved Hatsuon. Omit to let YMM4 derive pronunciation from displayText.",
+    ),
   frame: z.number().int().min(0),
   layer: z.number().int().min(0),
   maxLength: z.number().int().positive(),
@@ -379,20 +385,7 @@ const nativeVoiceMutationSchema = z
       entityId: z.string().min(1),
       revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
     }),
-  ])
-  .superRefine((value, context) => {
-    if (
-      value.action !== "delete" &&
-      value.displayText !== value.spokenText
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "displayText and spokenText must be identical for YMM4 native voice create/update",
-        path: ["spokenText"],
-      });
-    }
-  });
+  ]);
 
 const nativeDescriptorBindingFields = {
   descriptorId: z.string().min(1),
@@ -696,20 +689,21 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     {
       title: "Stage native YMM4 VoiceItem",
       description:
-        "Stage a sealed unified target plan with explicit native_voice strategy, resolved placement and character binding, capability schemas, scope, and change budget without changing YMM4. Display and spoken text must be exactly equal.",
+        "Stage a sealed unified target plan with explicit native_voice strategy, resolved placement and character binding, capability schemas, scope, and change budget without changing YMM4. Display text is VoiceItem.Serif. Omit spokenText to let YMM4 derive Hatsuon.",
       inputSchema: {
         entityId: z.string().min(1),
         displayText: z
           .string()
           .min(1)
           .describe(
-            "Displayed caption text. It must exactly equal spokenText in the current native VoiceItem slice.",
+            "Displayed VoiceItem serif.",
           ),
         spokenText: z
           .string()
           .min(1)
+          .optional()
           .describe(
-            "Spoken text. It must exactly equal displayText in the current native VoiceItem slice.",
+            "Optional approved Hatsuon. Omit to let YMM4 derive pronunciation from displayText.",
           ),
         characterName: z.string().min(1),
         frame: z.number().int().min(0),
@@ -720,11 +714,6 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     },
     async (input) => {
       try {
-        if (input.displayText !== input.spokenText) {
-          throw new Error(
-            "displayText and spokenText must be identical for the current YMM4 native voice slice",
-          );
-        }
         const result = await ymm4.stageNativeVoice(input);
         return textResult(
           formatStagedTaskReport({

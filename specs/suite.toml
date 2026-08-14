@@ -985,3 +985,31 @@ implementation_paths = [
 ]
 profiles = ["fast", "pr", "nightly"]
 residual = "Legacy kind-specific tasks remain available for compatibility, but they must never be presented as one atomic transaction. A single mixed bridge endpoint is required before broadening the public batch schema."
+
+[[property]]
+id = "YMM-067"
+module = "ymm4NativeVoiceTextProtocol"
+expression = "separateWithoutCapabilityNeverApplies"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/managed_cue.rs",
+  "crates/takegraph-service/src/ymm4_target_plan.rs",
+  "crates/takegraph-node/src/ymm4_capabilities.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "The model treats capability advertisement as a boolean. Live VoiceItem.Hatsuon writeback and audio-cache regeneration remain integration boundaries."
+
+[[property]]
+id = "YMM-068"
+module = "ymm4NativeVoiceTextProtocol"
+expression = "verifiedReadbackMatchesPolicy"
+owner = "ymm4-bridge"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "crates/takegraph-service/src/ymm4_realization.rs",
+  "crates/takegraph-service/src/ymm4_native_voice_mutation.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Bound spoken text requires exact Hatsuon readback. Derived spoken text requires a non-empty observed Hatsuon only. Live KanjiToYomi output and voice-cache rebuild remain integration boundaries."

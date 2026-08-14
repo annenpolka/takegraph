@@ -256,16 +256,16 @@ test("MCP native VoiceItem tools validate the v2 slice and delegate workflow", a
     (tool) => tool.name === "ymm4_native_voice_stage",
   );
   assert.ok(stageTool);
-  assert.match(stageTool.description ?? "", /exactly equal/);
+  assert.match(stageTool.description ?? "", /Hatsuon/);
   const spokenTextSchema = (
     stageTool.inputSchema.properties as Record<
       string,
       { description?: string }
     >
   ).spokenText;
-  assert.match(spokenTextSchema?.description ?? "", /exactly equal displayText/);
+  assert.match(spokenTextSchema?.description ?? "", /Hatsuon/);
 
-  const rejected = await client.callTool({
+  const split = await client.callTool({
     name: "ymm4_native_voice_stage",
     arguments: {
       entityId: "utt-native-01",
@@ -277,8 +277,8 @@ test("MCP native VoiceItem tools validate the v2 slice and delegate workflow", a
       maxLength: 240,
     },
   });
-  assert.equal((rejected as { isError?: boolean }).isError, true);
-  assert.equal(stagedInputs.length, 0);
+  assert.equal((split as { isError?: boolean }).isError, undefined);
+  assert.equal(stagedInputs.length, 1);
 
   const staged = await client.callTool({
     name: "ymm4_native_voice_stage",
@@ -293,7 +293,22 @@ test("MCP native VoiceItem tools validate the v2 slice and delegate workflow", a
     },
   });
   assert.equal((staged.structuredContent as { handle?: string }).handle, handle);
-  assert.equal(stagedInputs.length, 1);
+  assert.equal(stagedInputs.length, 2);
+
+  const omitted = await client.callTool({
+    name: "ymm4_native_voice_stage",
+    arguments: {
+      entityId: "utt-native-omit",
+      displayText: "読みはYMMに任せる",
+      characterName: "春日部つむぎ",
+      frame: 2000,
+      layer: 0,
+      maxLength: 240,
+    },
+  });
+  assert.equal((omitted as { isError?: boolean }).isError, undefined);
+  assert.equal(stagedInputs.length, 3);
+  assert.equal(stagedInputs[2]?.spokenText, undefined);
 
   const committed = await client.callTool({
     name: "ymm4_native_voice_commit",

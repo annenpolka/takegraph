@@ -58,6 +58,14 @@ test(
       "project_render",
       "project_render_cancel",
       "project_render_media_receipt",
+      "edit_surface_admit",
+      "composition_graph_apply",
+      "project_settings_mutation",
+      "project_scene_mutation",
+      "project_timeline_mutation",
+      "project_character_mutation",
+      "project_template_definition_edit",
+      "edit_transaction_apply",
     ]) {
       assert.ok(
         !structured.capabilities?.capabilities?.includes(capability),

@@ -1768,6 +1768,69 @@ test("timeline_edit stages ordered heterogeneous creates as one exact-digest tas
   assert.deepEqual(calls, ["stage", "commit", "status"]);
 });
 
+test("timeline_edit accepts native_voice_create with omitted spokenText", async (t) => {
+  const handle = "timeline-edit-omit-spoken";
+  const planDigest = "9".repeat(64);
+  const stagedInputs: StageTimelineEditInput[] = [];
+  const workflow = {
+    async stageTimelineEdit(input: StageTimelineEditInput) {
+      stagedInputs.push(input);
+      return {
+        handle,
+        digest: planDigest,
+        baseRevision: 31,
+        operationCount: input.operations.length,
+        operationKinds: input.operations.map((operation) => operation.op),
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+
+  const staged = taskFrom(
+    await current.client.callTool({
+      name: "takegraph_task_stage",
+      arguments: {
+        kind: "timeline_edit",
+        operations: [
+          {
+            op: "native_voice_create",
+            entityId: "voice-native-omit",
+            displayText: "読みはYMMに任せる",
+            characterName: "character",
+            frame: 2000,
+            layer: 2,
+            maxLength: 300,
+          },
+        ],
+      },
+    }),
+    {
+      taskId: `timeline_edit:${handle}`,
+      kind: "timeline_edit",
+      store: "canonical-project",
+      phase: "staged",
+    },
+  );
+  assert.equal(staged.planDigest, planDigest);
+  assert.equal(stagedInputs.length, 1);
+  assert.deepEqual(stagedInputs[0]?.operations, [
+    {
+      op: "native_voice_create",
+      entityId: "voice-native-omit",
+      displayText: "読みはYMMに任せる",
+      characterName: "character",
+      frame: 2000,
+      layer: 2,
+      maxLength: 300,
+    },
+  ]);
+  assert.equal(
+    "spokenText" in (stagedInputs[0]?.operations[0] ?? {}),
+    false,
+  );
+});
+
 test("timeline_edit rejects unsupported mutations and invalid batches before workflow dispatch", async (t) => {
   let stageCalls = 0;
   const workflow = {

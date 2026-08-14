@@ -12,6 +12,7 @@ pub mod native_extension_plan;
 pub mod project_operations;
 pub mod project_store;
 pub mod scene_inspection;
+pub mod ymm4_edit_contracts;
 pub mod ymm4_export;
 pub mod ymm4_native_extension;
 pub mod ymm4_native_voice_export;
@@ -50,6 +51,13 @@ pub use scene_inspection::{
     SceneHumanReview, SceneInspectionError, SceneInspectionPlan, SceneInspectionReceipt,
     SceneInspectionSource, SceneInspectionStatus, SceneInspectionTask, SceneReviewDecision,
     sample_changed_cue_frames,
+};
+pub use ymm4_edit_contracts::{
+    COMPOSITION_GRAPH_FEATURE, EDIT_SURFACE_FEATURE, EDIT_TRANSACTION_FEATURE,
+    PROJECT_CHARACTER_FEATURE, PROJECT_SCENE_FEATURE, PROJECT_SETTINGS_FEATURE,
+    PROJECT_TEMPLATE_DEFINITION_FEATURE, PROJECT_TIMELINE_FEATURE, ProjectEditStageRequest,
+    Ymm4EditContractError, admit_field_edit, apply_composition_intent, project_edit_feature,
+    require_advertised_edit_feature, seal_edit_transaction, stage_project_edit,
 };
 pub use ymm4_export::{Ymm4ExportError, Ymm4ExportPatch};
 pub use ymm4_native_extension::{

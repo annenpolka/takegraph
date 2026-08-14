@@ -41,7 +41,7 @@ pub use scene_composition::{
     YMM4_SCENE_COMPOSITION_SCHEMA_VERSION, Ymm4CompositionAvailability,
     Ymm4CompositionCompleteness, Ymm4CompositionElement, Ymm4CompositionElementStability,
     Ymm4CompositionViewport, Ymm4CompositionVisual, Ymm4SceneCompositionError,
-    Ymm4SceneCompositionSnapshot,
+    Ymm4SceneCompositionSnapshot, parse_composition_item_kind,
 };
 pub use scene_inspection::{
     ImportedSceneCapture, PNG_MEDIA_TYPE, PixelRect, Rgba8, SCENE_PIXEL_DETECTOR_VERSION,

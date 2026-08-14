@@ -9,7 +9,31 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use takegraph_core::ItemKind;
+
 use crate::{Ymm4BridgeClient, Ymm4Error};
+
+/// Maps a YMM4 composition `kind` string onto the portable item family.
+///
+/// The bridge reports type suffixes without the `Item` tail (`Voice`, `Text`).
+/// Unknown plugin or tachie-specific labels stay [`ItemKind::UnknownItem`] so
+/// composition-graph mutation can fail closed instead of guessing.
+#[must_use]
+pub fn parse_composition_item_kind(kind: &str) -> ItemKind {
+    match kind {
+        "Audio" | "AudioItem" => ItemKind::AudioItem,
+        "Voice" | "VoiceItem" => ItemKind::VoiceItem,
+        "Image" | "ImageItem" | "Video" | "VideoItem" => ItemKind::AssetItem,
+        "Text" | "TextItem" => ItemKind::TextItem,
+        "Shape" | "ShapeItem" => ItemKind::ShapeItem,
+        "Effect" | "EffectItem" => ItemKind::EffectItem,
+        "FrameBuffer" | "FrameBufferItem" => ItemKind::FrameBufferItem,
+        "Group" | "GroupItem" => ItemKind::GroupItem,
+        "Scene" | "SceneItem" | "SceneTimeline" => ItemKind::SceneItem,
+        "Transition" | "TransitionItem" => ItemKind::TransitionItem,
+        _ => ItemKind::UnknownItem,
+    }
+}
 
 fn require_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -439,6 +463,24 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use takegraph_core::ItemKind;
+
+    #[test]
+    fn composition_kind_parser_is_explicit_and_fail_closed() {
+        assert_eq!(parse_composition_item_kind("Voice"), ItemKind::VoiceItem);
+        assert_eq!(parse_composition_item_kind("TextItem"), ItemKind::TextItem);
+        assert_eq!(parse_composition_item_kind("Shape"), ItemKind::ShapeItem);
+        assert_eq!(parse_composition_item_kind("Image"), ItemKind::AssetItem);
+        assert_eq!(
+            parse_composition_item_kind("FrameBuffer"),
+            ItemKind::FrameBufferItem
+        );
+        assert_eq!(parse_composition_item_kind("Tachie"), ItemKind::UnknownItem);
+        assert_eq!(
+            parse_composition_item_kind("vendor.plugin.Glow"),
+            ItemKind::UnknownItem
+        );
+    }
 
     fn unavailable_visual() -> Ymm4CompositionVisual {
         Ymm4CompositionVisual {

@@ -3,14 +3,34 @@
 //! This crate contains deterministic state transitions only. It intentionally
 //! has no filesystem, network, database, or operating-system dependencies.
 
+pub mod composition_graph;
+pub mod edit_surface;
+pub mod edit_transaction;
 pub mod managed_cue;
 pub mod native_extension;
+pub mod project_edit;
 pub mod project_initialization;
 pub mod reconciliation;
 pub mod revision;
 pub mod timeline_edit;
 pub mod voice;
 
+pub use composition_graph::{
+    CompositionError, CompositionGraph, CompositionIntent, CompositionOutcome, EntityId,
+    FRAME_BUFFER_ID, GraphBinding, GraphEntity, INITIAL_FOCUS_ID, INITIAL_REVISION, Interpolation,
+    ItemKind, Keyframe, ROOT_GROUP_ID, SCENE_A_ID, STABLE_PAINT_SIBLING_ID, TRANSITION_ID,
+};
+pub use edit_surface::{
+    ApplicationEvidence, Availability, CrudKind, EditSurfaceError, EditSurfaceRejectReason,
+    EditSurfaceSession, EditSurfaceStatus, FieldClass, INITIAL_CANONICAL_REVISION, ItemFamily,
+    NormalizedPatch, Ownership, PatchInput, PlanBinding, TargetLock,
+};
+pub use edit_transaction::{
+    EDIT_TRANSACTION_MAX_OPERATIONS, EditTransactionError, EditTransactionPlan,
+    EditTransactionRequest, EditTransactionSession, EndpointMode, LaterTaskStatus,
+    ReadbackEvidence, SemanticFamily, TargetScope, TransactionOperation, TransactionRejectReason,
+    TransactionStatus, representative_operations,
+};
 pub use managed_cue::{
     BindingDependency, CanonicalError, CapabilityDependency, ChangeBudget, DurationResolution,
     FallbackPolicy, FallbackReason, ManagedCueIntent, NativeRealization, OrderingPolicy,
@@ -29,6 +49,11 @@ pub use native_extension::{
     NativeTemplateIntent, OpaqueNativeEffect, PlannedNativeExtension, PortraitIntent,
     PortraitPresentation, PreservationPlan, PreservedNativeField, ReplacementGuard,
     TemplateDescriptor,
+};
+pub use project_edit::{
+    CharacterSettingClass, DependentPolicy, INITIAL_HEAD_REVISION, ProjectEditCapability,
+    ProjectEditError, ProjectEditKind, ProjectEditPlan, ProjectEditSession, ProjectEditStatus,
+    ProjectSettingClass,
 };
 pub use project_initialization::{
     PROJECT_INITIALIZATION_PLAN_SCHEMA_VERSION, ProjectInitializationDestination,

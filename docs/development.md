@@ -162,8 +162,10 @@ closed.
 Stage commands do not mutate YMM4. Commit commands persist approval before
 external I/O; the bridge journals the request before YMM4 mutation and
 persists a read-back receipt before finalization. The `native-voice-*`
-creation workflow is intentionally create-only and requires identical
-display/spoken text; use `native-voice-mutation-*` for approved
+creation workflow is intentionally create-only. Display text is VoiceItem.Serif.
+Omit spoken text to let YMM4 derive Hatsuon; supply it to bind Hatsuon exactly.
+Bound display and spoken may differ when the bridge advertises
+`separateDisplayAndSpokenText`. Use `native-voice-mutation-*` for approved
 create/update/delete batches and exact artifact export. Both paths treat
 `maxLength` as an approved rollback boundary. `save` never performs Save As;
 open or create a named project in YMM4 first.

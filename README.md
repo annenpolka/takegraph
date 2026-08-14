@@ -90,7 +90,7 @@ remain accepted for compatibility.
       "op": "native_voice_create",
       "entityId": "line-002",
       "displayText": "次の台詞",
-      "spokenText": "次の台詞",
+      "spokenText": "つぎのせりふ",
       "characterName": "春日部つむぎ",
       "frame": 180,
       "layer": 2,

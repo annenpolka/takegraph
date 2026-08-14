@@ -507,7 +507,7 @@ internal sealed partial class Ymm4Facade
                     "Timeline-edit managed cue identity collides with a native extension",
                     snapshot.Fingerprint);
             }
-            ValidateUtterances(portable, verifyArtifacts: validateArtifacts);
+            ValidateTimelineEditPayloads(portable, native, verifyArtifacts: validateArtifacts);
             Application.Current.Dispatcher.Invoke(() =>
             {
                 if (portable.Count > 0)
@@ -522,8 +522,7 @@ internal sealed partial class Ymm4Facade
         }
         else
         {
-            ValidateUtterances(portable, verifyArtifacts: false);
-            ValidateNativeVoiceCues(native);
+            ValidateTimelineEditPayloads(portable, native, verifyArtifacts: false);
         }
         var strategyCounts = new SortedDictionary<string, int>(StringComparer.Ordinal);
         if (portable.Count > 0) strategyCounts["portable_pair"] = portable.Count;
@@ -546,6 +545,28 @@ internal sealed partial class Ymm4Facade
                 actions.Count(value => value == "update"),
                 actions.Count(value => value == "delete"),
                 portable.Count * 2 + native.Count));
+    }
+
+    /// Mixed timeline-edit may be portable-only, native-only, or both. Empty
+    /// portable must not require a managed utterance.
+    internal static void ValidateTimelineEditPayloads(
+        IReadOnlyList<ManagedUtteranceDto> portable,
+        IReadOnlyList<NativeVoiceCueDto> native,
+        bool verifyArtifacts)
+    {
+        if (portable.Count == 0 && native.Count == 0)
+        {
+            throw new BridgeValidationException(
+                "Timeline-edit requires at least one portable or native managed cue");
+        }
+        if (portable.Count > 0)
+        {
+            ValidateUtterances(portable, verifyArtifacts);
+        }
+        if (native.Count > 0)
+        {
+            ValidateNativeVoiceCues(native);
+        }
     }
 
     private static TimelineEditPreparation PrepareTimelineEdit(ParsedTimelineEdit parsed)
@@ -704,7 +725,8 @@ internal sealed partial class Ymm4Facade
         null,
         null,
         cue.CharacterName,
-        cue.RealizationId.ToString("D"));
+        cue.RealizationId.ToString("D"),
+        cue.SpokenText);
 
     private static void EnsureTimelineEditReceiptBinding(
         TimelineEditApplyRequestDto request,

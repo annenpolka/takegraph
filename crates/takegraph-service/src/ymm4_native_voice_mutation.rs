@@ -714,7 +714,7 @@ impl Ymm4NativeVoiceMutationPatch {
                 artifact_root,
                 &mutation.character_name,
                 &mutation.display_text,
-                &mutation.spoken_text,
+                mutation.spoken_text.as_deref(),
             )?);
         }
         self.receipt = Some(replay.receipt);
@@ -765,7 +765,7 @@ impl Ymm4NativeVoiceMutationPatch {
                 artifact_root,
                 &mutation.character_name,
                 &mutation.display_text,
-                &mutation.spoken_text,
+                mutation.spoken_text.as_deref(),
             )?;
         }
         Ok(())
@@ -964,12 +964,13 @@ fn validate_mutations(
         if mutation.action != Ymm4NativeVoiceMutationAction::Delete
             && (mutation.character_name.trim().is_empty()
                 || mutation.display_text.trim().is_empty()
-                || mutation.spoken_text.trim().is_empty()
-                || mutation.display_text != mutation.spoken_text)
+                || mutation
+                    .spoken_text
+                    .as_ref()
+                    .is_some_and(|spoken| spoken.trim().is_empty()))
         {
             return Err(Ymm4NativeVoiceMutationError::InvalidMutation(
-                "create/update requires exact character, text, and equal display/spoken text"
-                    .into(),
+                "create/update requires exact character, non-empty display text, and optional non-empty spoken text".into(),
             ));
         }
     }
@@ -1048,6 +1049,13 @@ fn verify_mutation_items(
             || item.revision != mutation.revision
             || item.speaker.as_deref() != Some(mutation.character_name.as_str())
             || item.text.as_deref() != Some(mutation.display_text.as_str())
+            || match mutation.spoken_text.as_deref() {
+                Some(spoken) => item.spoken_text.as_deref() != Some(spoken),
+                None => item
+                    .spoken_text
+                    .as_deref()
+                    .is_none_or(|observed| observed.trim().is_empty()),
+            }
             || item.frame != mutation.frame
             || item.layer != mutation.layer
             || item.length <= 0
@@ -1192,7 +1200,7 @@ mod tests {
             revision: 4,
             character_name: "魔理沙".into(),
             display_text: "ここから第二形態だぜ".into(),
-            spoken_text: "ここから第二形態だぜ".into(),
+            spoken_text: Some("ここから第二形態だぜ".into()),
             frame: 120,
             layer: 20,
             max_length: 180,
@@ -1210,6 +1218,7 @@ mod tests {
             layer: mutation.layer,
             length: 90,
             text: Some(mutation.display_text),
+            spoken_text: mutation.spoken_text,
             audio_path: None,
             artifact_hash: None,
             speaker: Some(mutation.character_name),

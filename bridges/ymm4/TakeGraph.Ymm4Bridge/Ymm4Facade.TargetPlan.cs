@@ -467,7 +467,7 @@ internal sealed partial class Ymm4Facade
         var entityId = RequireJsonString(intent, "entityId");
         var entityRevision = RequireJsonULong(intent, "entityRevision");
         var displayText = RequireJsonString(intent, "displayText");
-        var spokenText = RequireJsonString(intent, "spokenText");
+        var spokenText = RequireOptionalJsonString(intent, "spokenText");
         var speakerRole = RequireJsonString(intent, "speakerRole");
         var voiceProfile = RequireOptionalJsonString(intent, "voiceProfile")
             ?? throw new BridgeValidationException("Target-plan voiceProfile must be resolved");
@@ -530,7 +530,12 @@ internal sealed partial class Ymm4Facade
                 throw new BridgeValidationException("Portable-pair duration must be exact");
             }
             var length = RequirePositiveJsonInt(duration, "frames");
-            ValidateOwnership(ownership, portableStrategy: true);
+            if (spokenText is null)
+            {
+                throw new BridgeValidationException(
+                    "Portable pair spokenText must be a non-empty approved synthesis input");
+            }
+            ValidateOwnership(ownership, portableStrategy: true, spokenBound: true);
             if (bindings.Length != 1)
             {
                 throw new BridgeValidationException(
@@ -593,7 +598,6 @@ internal sealed partial class Ymm4Facade
             || action != "create"
             || RequireJsonString(intent, "realizationPreference") != "require_native"
             || RequireJsonString(intent, "fallbackPolicy") != "reject"
-            || displayText != spokenText
             || secondaryLayer is not null)
         {
             throw new BridgeValidationException(
@@ -610,7 +614,7 @@ internal sealed partial class Ymm4Facade
             "max_frames",
             "maxFrames");
         var maxLength = RequirePositiveJsonInt(duration, nativeMaxFramesField);
-        ValidateOwnership(ownership, portableStrategy: false);
+        ValidateOwnership(ownership, portableStrategy: false, spokenBound: spokenText is not null);
         if (bindings.Length != 1)
         {
             throw new BridgeValidationException(
@@ -837,15 +841,22 @@ internal sealed partial class Ymm4Facade
         }
     }
 
-    private static void ValidateOwnership(JsonElement ownership, bool portableStrategy)
+    private static void ValidateOwnership(
+        JsonElement ownership,
+        bool portableStrategy,
+        bool spokenBound)
     {
         RequireExactJsonProperties(ownership, "strict", "derived", "preserve", "global");
         var strict = portableStrategy
             ? new[] { "identity", "captionText", "audioArtifact", "timing" }
-            : new[] { "identity", "text", "characterBinding", "timingIntent" };
+            : spokenBound
+                ? new[] { "identity", "displayText", "spokenText", "characterBinding", "timingIntent" }
+                : new[] { "identity", "displayText", "characterBinding", "timingIntent" };
         var derived = portableStrategy
             ? Array.Empty<string>()
-            : new[] { "length", "pronunciation", "voiceCache" };
+            : spokenBound
+                ? new[] { "length", "voiceCache" }
+                : new[] { "length", "pronunciation", "voiceCache" };
         var global = portableStrategy
             ? new[] { "projectSettings" }
             : new[] { "characterDefinitions", "projectSettings" };

@@ -142,7 +142,7 @@ pub fn native_voice_target_plan(
             &cue.entity_id,
             cue.revision,
             &cue.display_text,
-            &cue.spoken_text,
+            cue.spoken_text.clone().unwrap_or_default(),
             &cue.character_name,
             PlacementIntent {
                 anchor: TimingAnchor::AbsoluteFrame { frame: cue.frame },
@@ -150,9 +150,18 @@ pub fn native_voice_target_plan(
                 track_role: "dialogue".into(),
             },
         );
+        intent.spoken_text.clone_from(&cue.spoken_text);
         intent.realization_preference = RealizationPreference::RequireNative;
         intent.fallback_policy = FallbackPolicy::Reject;
         intent.voice_profile = Some(cue.character_name.clone());
+        intent.select_strategy(takegraph_core::RealizationAvailability {
+            native_voice: true,
+            native_separate_display_and_spoken_text: feature_flag(
+                voice_feature,
+                "separateDisplayAndSpokenText",
+            ),
+            portable_audio_caption: false,
+        })?;
         let binding_digest =
             canonical_sha256("takegraph-ymm4-character-name-binding", &cue.character_name)?;
         cues.push(PlannedCue {
@@ -169,7 +178,7 @@ pub fn native_voice_target_plan(
             duration: DurationResolution::Bounded {
                 max_frames: positive_frames(cue.max_length)?,
             },
-            ownership: OwnershipMask::native_voice_create(),
+            ownership: OwnershipMask::native_voice_create_with_spoken(cue.spoken_text.is_some()),
             capability_dependencies: vec![
                 capability_dependency("targetPlan.apply", target_plan_feature),
                 capability_dependency("voiceItem.create", voice_feature),
@@ -213,6 +222,13 @@ fn required_feature<'a>(
         .feature(name)
         .filter(|feature| feature.available)
         .ok_or_else(|| TargetPlanBuildError::MissingCapability(name.into()))
+}
+
+fn feature_flag(feature: &takegraph_node::FeatureDescriptor, name: &str) -> bool {
+    matches!(
+        feature.properties.get(name),
+        Some(takegraph_node::CapabilityValue::Boolean(true))
+    )
 }
 
 fn capability_dependency(
@@ -377,7 +393,7 @@ mod tests {
                 revision: 1,
                 character_name: "魔理沙".into(),
                 display_text: "第二形態だぜ".into(),
-                spoken_text: "第二形態だぜ".into(),
+                spoken_text: Some("第二形態だぜ".into()),
                 frame: 10,
                 layer: 20,
                 max_length: 120,
@@ -415,8 +431,37 @@ mod tests {
             RealizationStrategy::PortableAudioCaption
         );
         assert_eq!(portable.cues[0].intent.display_text, "第二形態だぜ");
-        assert_eq!(portable.cues[0].intent.spoken_text, "だいにけいたいだぜ");
+        assert_eq!(
+            portable.cues[0].intent.spoken_text.as_deref(),
+            Some("だいにけいたいだぜ")
+        );
         assert_eq!(native.capability_digest, portable.capability_digest);
+        let separate = native_voice_target_plan(
+            RevisionId(3),
+            Uuid::from_u128(3),
+            &snapshot(),
+            &[Ymm4NativeVoiceCue {
+                realization_id: Uuid::from_u128(4),
+                entity_id: "utt-02".into(),
+                revision: 1,
+                character_name: "魔理沙".into(),
+                display_text: "第二形態だぜ".into(),
+                spoken_text: Some("だいにけいたいだぜ".into()),
+                frame: 10,
+                layer: 20,
+                max_length: 120,
+            }],
+            &capabilities(),
+        )
+        .unwrap();
+        assert_eq!(
+            separate.cues[0].intent.spoken_text.as_deref(),
+            Some("だいにけいたいだぜ")
+        );
+        assert_eq!(
+            separate.cues[0].strategy,
+            RealizationStrategy::Ymm4NativeVoice
+        );
         let request =
             takegraph_node::Ymm4TargetPlanApplyRequest::new(native.clone(), snapshot().fingerprint)
                 .unwrap();
@@ -433,6 +478,36 @@ mod tests {
         assert_ne!(
             native.canonical_digest().unwrap(),
             portable.canonical_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn omitted_spoken_text_leaves_pronunciation_derived() {
+        let derived = native_voice_target_plan(
+            RevisionId(3),
+            Uuid::from_u128(5),
+            &snapshot(),
+            &[Ymm4NativeVoiceCue {
+                realization_id: Uuid::from_u128(6),
+                entity_id: "utt-03".into(),
+                revision: 1,
+                character_name: "魔理沙".into(),
+                display_text: "第二形態だぜ".into(),
+                spoken_text: None,
+                frame: 10,
+                layer: 20,
+                max_length: 120,
+            }],
+            &capabilities(),
+        )
+        .unwrap();
+        assert_eq!(derived.cues[0].intent.spoken_text, None);
+        assert!(
+            derived.cues[0]
+                .ownership
+                .derived
+                .iter()
+                .any(|field| field == "pronunciation")
         );
     }
 }

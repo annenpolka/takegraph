@@ -613,7 +613,8 @@ internal sealed partial class Ymm4Facade
                         null,
                         null,
                         value.CharacterName,
-                        value.RealizationId.ToString("D"))).ToArray(),
+                        value.RealizationId.ToString("D"),
+                        value.SpokenText)).ToArray(),
                     new Dictionary<Guid, string>(),
                     []));
                 BridgeFaultInjection.ThrowIf("after_journal_before_mutation");
@@ -816,7 +817,8 @@ internal sealed partial class Ymm4Facade
                             null,
                             null,
                             value.CharacterName,
-                            value.RealizationId.ToString("D")))
+                            value.RealizationId.ToString("D"),
+                            value.SpokenText))
                         .ToArray(),
                     preparation.PreservedStateDigests,
                     preparation.Originals.Values.Select(value => value.Item)));
@@ -2096,6 +2098,7 @@ internal sealed partial class Ymm4Facade
             && item.Length is > 0
             && item.Length <= cue.MaxLength
             && item.Text == cue.DisplayText
+            && SpokenTextMatches(cue.SpokenText, item.SpokenText)
             && item.Speaker == cue.CharacterName));
     }
 
@@ -2275,7 +2278,7 @@ internal sealed partial class Ymm4Facade
                                 mutation.Frame,
                                 mutation.Layer,
                                 preparation.Characters[mutation.RealizationId],
-                                mutation.SpokenText,
+                                mutation.DisplayText,
                                 preparation.Decorations,
                             ]) as Task
                         ?? throw new BridgeUnavailableException(
@@ -2299,7 +2302,7 @@ internal sealed partial class Ymm4Facade
                         item.TypeName.EndsWith(".VoiceItem", StringComparison.Ordinal)
                         && item.Frame == mutation.Frame
                         && item.Layer == mutation.Layer
-                        && item.Text == mutation.SpokenText
+                        && item.Text == mutation.DisplayText
                         && item.CharacterName == mutation.CharacterName
                         && item.Length > 0))
                 {
@@ -2317,7 +2320,7 @@ internal sealed partial class Ymm4Facade
                         item.TypeName.EndsWith(".VoiceItem", StringComparison.Ordinal)
                         && item.Frame == mutation.Frame
                         && item.Layer == mutation.Layer
-                        && item.Text == mutation.SpokenText
+                        && item.Text == mutation.DisplayText
                         && item.CharacterName == mutation.CharacterName)
                     .ToArray();
                 if (voices.Length != 1 || newItems.Length != 1)
@@ -2354,6 +2357,7 @@ internal sealed partial class Ymm4Facade
                     ReplaceBatchItems(preparation.Timeline, [original.Item], []);
                     preparation.DeletedItems.Add(original.Item);
                 }
+                ApplyOwnedNativeVoiceTexts(voice.Item, mutation.DisplayText, mutation.SpokenText);
                 if (voice.Length <= 0 || voice.Length > mutation.MaxLength)
                 {
                     throw new BridgeConflictException(
@@ -2612,6 +2616,7 @@ internal sealed partial class Ymm4Facade
                 || matches[0].Revision != mutation.Revision
                 || matches[0].Speaker != mutation.CharacterName
                 || matches[0].Text != mutation.DisplayText
+                || !SpokenTextMatches(mutation.SpokenText, matches[0].SpokenText)
                 || matches[0].Frame != mutation.Frame
                 || matches[0].Layer != mutation.Layer
                 || matches[0].Length is <= 0
@@ -2669,8 +2674,7 @@ internal sealed partial class Ymm4Facade
             ["realizationId"] = realizationId.ToString("D"),
             ["characterName"] = GetString(item, "CharacterName"),
             ["displayText"] = GetString(item, "Serif"),
-            // spokenText is the approved speech input (Serif), not engine Hatsuon.
-            ["spokenText"] = GetString(item, "Serif"),
+            ["spokenText"] = GetString(item, "Hatsuon", "Pronounce"),
             ["hatsuon"] = GetString(item, "Hatsuon"),
             ["pronounceType"] = GetMember(item, "Pronounce")?.GetType().FullName,
             ["voiceParameterType"] = GetMember(item, "VoiceParameter")?.GetType().FullName,
@@ -6342,7 +6346,8 @@ internal sealed partial class Ymm4Facade
                 null,
                 null,
                 voiceItem.CharacterName,
-                marker.RealizationId.ToString("D")));
+                marker.RealizationId.ToString("D"),
+                voiceItem.SpokenText));
         }
         foreach (var captionItem in rawItems)
         {
@@ -6512,7 +6517,7 @@ internal sealed partial class Ymm4Facade
                                 cue.Frame,
                                 cue.Layer,
                                 preparation.Characters[cue.RealizationId],
-                                cue.SpokenText,
+                                cue.DisplayText,
                                 preparation.Decorations,
                             ]) as Task
                         ?? throw new BridgeUnavailableException(
@@ -6532,7 +6537,7 @@ internal sealed partial class Ymm4Facade
                         preparation.TimelineViewModel)
                     .Where(item => !preparation.KnownItems.Contains(item.Item))
                     .ToArray());
-                if (newItems.Any(item => IsExpectedNativeVoice(item, cue) && item.Length > 0))
+                if (newItems.Any(item => IsExpectedNativeVoicePlacement(item, cue) && item.Length > 0))
                 {
                     break;
                 }
@@ -6546,7 +6551,7 @@ internal sealed partial class Ymm4Facade
                     preparation.KnownItems.Add(item.Item);
                 }
                 var voices = newItems
-                    .Where(item => IsExpectedNativeVoice(item, cue))
+                    .Where(item => IsExpectedNativeVoicePlacement(item, cue))
                     .ToArray();
                 if (voices.Length != 1)
                 {
@@ -6566,6 +6571,7 @@ internal sealed partial class Ymm4Facade
                     voice.Item,
                     RemarkCodec.Append(voice.Remark, marker),
                     "Remark");
+                ApplyOwnedNativeVoiceTexts(voice.Item, cue.DisplayText, cue.SpokenText);
                 if (newItems.Length != 1)
                 {
                     throw new BridgeUnavailableException(
@@ -6588,13 +6594,43 @@ internal sealed partial class Ymm4Facade
         }
     }
 
-    private static bool IsExpectedNativeVoice(RawItem item, NativeVoiceCueDto cue)
+    private static bool IsExpectedNativeVoicePlacement(RawItem item, NativeVoiceCueDto cue)
     {
         return item.TypeName.EndsWith(".VoiceItem", StringComparison.Ordinal)
             && item.Frame == cue.Frame
             && item.Layer == cue.Layer
-            && item.Text == cue.SpokenText
+            && item.Text == cue.DisplayText
             && item.CharacterName == cue.CharacterName;
+    }
+
+    private static bool SpokenTextMatches(string? approved, string? observed)
+    {
+        if (approved is null)
+        {
+            return !string.IsNullOrWhiteSpace(observed);
+        }
+        return string.Equals(approved, observed, StringComparison.Ordinal);
+    }
+
+    private static void ApplyOwnedNativeVoiceTexts(
+        object item,
+        string displayText,
+        string? spokenText)
+    {
+        SetRequired(item, displayText, "Serif");
+        if (spokenText is not null)
+        {
+            SetRequired(item, spokenText, "Hatsuon");
+        }
+        var serif = GetString(item, "Serif", "Text");
+        var hatsuon = GetString(item, "Hatsuon", "Pronounce");
+        if (serif != displayText || !SpokenTextMatches(spokenText, hatsuon))
+        {
+            throw new BridgeUnavailableException(
+                spokenText is null
+                    ? "YMM4 VoiceItem did not produce a derived pronunciation"
+                    : "YMM4 VoiceItem did not retain the approved display and spoken text");
+        }
     }
 
     private static object RequireMainModel(object mainViewModel)
@@ -7737,14 +7773,11 @@ internal sealed partial class Ymm4Facade
             if (mutation.Action != "delete"
                 && (string.IsNullOrWhiteSpace(mutation.CharacterName)
                     || string.IsNullOrWhiteSpace(mutation.DisplayText)
-                    || string.IsNullOrWhiteSpace(mutation.SpokenText)
-                    || !string.Equals(
-                        mutation.DisplayText,
-                        mutation.SpokenText,
-                        StringComparison.Ordinal)))
+                    || mutation.SpokenText is { Length: 0 }
+                    || mutation.SpokenText?.Trim().Length == 0))
             {
                 throw new BridgeValidationException(
-                    "Native voice create/update requires exact character, non-empty text, and equal display/spoken text");
+                    "Native voice create/update requires exact character, non-empty display text, and optional non-empty spoken text");
             }
         }
     }
@@ -7786,15 +7819,13 @@ internal sealed partial class Ymm4Facade
                 || string.IsNullOrWhiteSpace(cue.EntityId)
                 || string.IsNullOrWhiteSpace(cue.CharacterName)
                 || string.IsNullOrWhiteSpace(cue.DisplayText)
-                || string.IsNullOrWhiteSpace(cue.SpokenText))
-            {
-                throw new BridgeValidationException("Native voice cue fields must not be empty");
-            }
-            if (!string.Equals(cue.DisplayText, cue.SpokenText, StringComparison.Ordinal))
+                || cue.SpokenText is { Length: 0 }
+                || cue.SpokenText?.Trim().Length == 0)
             {
                 throw new BridgeValidationException(
-                    "This YMM4 driver cannot yet separate native voice display text from spoken text; use portable audio/caption fallback");
+                    "Native voice display text is required and spoken text must be omitted or non-empty");
             }
+
             if (cue.Frame < 0 || cue.Layer < 0 || cue.MaxLength <= 0)
             {
                 throw new BridgeValidationException(

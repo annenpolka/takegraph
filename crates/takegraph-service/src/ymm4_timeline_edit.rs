@@ -883,7 +883,7 @@ mod tests {
                 revision: 1,
                 character_name: "speaker".into(),
                 display_text: "caption".into(),
-                spoken_text: "caption".into(),
+                spoken_text: Some("caption".into()),
                 frame: 50,
                 layer: 3,
                 max_length: 60,
@@ -1171,6 +1171,7 @@ mod tests {
             serde_json::json!({
                 "entityId": "native", "revision": 1, "kind": "voice",
                 "frame": 50, "layer": 3, "length": 45, "text": "caption",
+                "spokenText": "caption",
                 "audioPath": null, "artifactHash": null, "speaker": "speaker",
                 "realizationId": Uuid::from_u128(22)
             }),

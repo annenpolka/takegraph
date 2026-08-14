@@ -219,7 +219,7 @@ export type StageYmm4Request = StageYmm4Input | StageYmm4BatchInput;
 export interface StageNativeVoiceInput {
   entityId: string;
   displayText: string;
-  spokenText: string;
+  spokenText?: string;
   characterName: string;
   frame: number;
   layer: number;
@@ -243,7 +243,7 @@ interface NativeVoiceMutationWriteInput extends NativeVoiceMutationCommonInput {
   realizationId?: string;
   characterName: string;
   displayText: string;
-  spokenText: string;
+  spokenText?: string;
   frame: number;
   layer: number;
   maxLength: number;
@@ -357,7 +357,7 @@ type PreparedTimelineEditOperation =
         revision: number;
         characterName: string;
         displayText: string;
-        spokenText: string;
+        spokenText?: string;
         frame: number;
         layer: number;
         maxLength: number;
@@ -641,13 +641,6 @@ export class Ymm4Workflow {
     const items = "items" in input ? input.items : [input];
     requireBatchItems(items, "YMM4 native voice");
     requireUniqueEntityIds(items, "YMM4 native voice");
-    for (const item of items) {
-      if (item.displayText !== item.spokenText) {
-        throw new Error(
-          "displayText and spokenText must be identical for the current YMM4 native voice slice",
-        );
-      }
-    }
     await this.requireNamedProject();
 
     await fs.mkdir(this.stateDirectory, { recursive: true });
@@ -770,17 +763,6 @@ export class Ymm4Workflow {
         "YMM4 timeline edit maxChangedEntities must cover every operation",
       );
     }
-    for (const operation of input.operations) {
-      if (
-        operation.op === "native_voice_create" &&
-        operation.displayText !== operation.spokenText
-      ) {
-        throw new Error(
-          "displayText and spokenText must be identical for a YMM4 native voice create",
-        );
-      }
-    }
-
     const snapshot = await this.requireNamedProject();
     await fs.mkdir(this.stateDirectory, { recursive: true });
     const canonical = await this.readHead();
@@ -1028,17 +1010,11 @@ export class Ymm4Workflow {
           revision: mutation.revision,
           characterName: "",
           displayText: "",
-          spokenText: "",
           frame: 0,
           layer: 0,
           maxLength: 1,
           action: mutation.action,
         };
-      }
-      if (mutation.displayText !== mutation.spokenText) {
-        throw new Error(
-          "displayText and spokenText must be identical for YMM4 native voice create/update",
-        );
       }
       return { ...mutation, realizationId };
     });

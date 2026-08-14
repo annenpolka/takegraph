@@ -55,8 +55,12 @@ The first implementation deliberately stops short of general native editing:
   head through `ymm4 canonical-head`; it has no separate `revision.json` mirror;
 - native identity uses `VoiceItem.Remark`, one item is verified per
   realization, and actual length must remain within the approved `maxLength`;
-- the initial native slice requires identical display/spoken text and exact
-  character name. Other cases must use the portable realization explicitly;
+- native voice owns `displayText` as VoiceItem.Serif. `spokenText` is optional:
+  when present it is written to VoiceItem.Hatsuon and read back exactly; when
+  omitted, YMM4 derives Hatsuon and TakeGraph only requires that a non-empty
+  pronunciation exists. Distinct bound values require
+  `voiceItem.create/update.separateDisplayAndSpokenText`. Character names stay
+  exact;
 - the Quint model and suite now cover request binding, WAL-before-mutation,
   partial apply, crash/restart recovery, rollback, at-most-once apply, and
   capability invalidation.
@@ -207,9 +211,10 @@ take.
 
 TakeGraph supplies its immutable audio artifact and caption. The adapter may
 use the version 1 audio/caption pair when YMM4 cannot represent the requested
-semantics, including exact A/B take reproduction or separate display/spoken
-text. This fallback is part of `TargetPlan`; it is never silent. Changing the
-strategy changes the digest and invalidates approval.
+semantics, including exact A/B take reproduction. Distinct display and spoken
+text is a native capability when advertised; otherwise the portable pair is
+the explicit fallback. This fallback is part of `TargetPlan`; it is never
+silent. Changing the strategy changes the digest and invalidates approval.
 
 Portable manifests carry `caption` and `spokenText` independently. The latter
 records the text used to materialize the hash-bound audio artifact and is
