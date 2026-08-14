@@ -6,6 +6,7 @@
 
 use takegraph_core::{Patch, PatchError, PatchId, RevisionId};
 
+pub mod annotation_store;
 mod external_mutation;
 mod managed_projection;
 pub mod native_extension_plan;
