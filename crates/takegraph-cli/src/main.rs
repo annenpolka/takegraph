@@ -709,31 +709,54 @@ enum Ymm4Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match parse_cli().command {
         Command::PatchCommit {
             base,
             head,
             digest,
             approved_digest,
-        } => {
-            if approved_digest != digest {
-                return Err("approval does not match the staged patch digest".into());
-            }
+        } => commit_guarded_patch(base, head, &digest, &approved_digest),
+        command => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(8 * 1024 * 1024)
+            .build()?
+            .block_on(run_async(command)),
+    }
+}
 
-            let mut patch = Patch::draft(RevisionId(base), digest);
-            patch.validate()?;
-            patch.materialize_preview()?;
-            patch.approve()?;
-            let revision = patch.commit(RevisionId(head))?;
-            println!("{}", serde_json::json!({ "revision": revision.0 }));
-        }
-        Command::Voicevox { command } => run_voicevox(command).await?,
-        Command::Ymm4 { command } => Box::pin(run_ymm4(command)).await?,
+#[inline(never)]
+fn parse_cli() -> Cli {
+    Cli::parse()
+}
+
+fn commit_guarded_patch(
+    base: u64,
+    head: u64,
+    digest: &str,
+    approved_digest: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if approved_digest != digest {
+        return Err("approval does not match the staged patch digest".into());
     }
 
+    let mut patch = Patch::draft(RevisionId(base), digest);
+    patch.validate()?;
+    patch.materialize_preview()?;
+    patch.approve()?;
+    let revision = patch.commit(RevisionId(head))?;
+    println!("{}", serde_json::json!({ "revision": revision.0 }));
     Ok(())
+}
+
+async fn run_async(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Command::PatchCommit { .. } => {
+            unreachable!("patch-commit is handled before the async runtime starts")
+        }
+        Command::Voicevox { command } => run_voicevox(command).await,
+        Command::Ymm4 { command } => Box::pin(run_ymm4(command)).await,
+    }
 }
 
 async fn run_voicevox(command: VoicevoxCommand) -> Result<(), Box<dyn std::error::Error>> {

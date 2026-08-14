@@ -1,0 +1,4 @@
+# Clean Windows debug builds of the clap-heavy takegraph CLI overflow the
+# default 1 MiB thread stack. This is a linker default, not a product invariant.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
