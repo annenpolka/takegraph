@@ -25,10 +25,17 @@ function createServer(options: CreateServerOptions = {}) {
 }
 
 function stateFrom(result: unknown): ProjectState {
-  const state = (
-    result as { structuredContent?: { state?: ProjectState } }
-  ).structuredContent?.state;
-  assert.ok(state, "tool result should include project state");
+  const record = result as {
+    isError?: boolean;
+    structuredContent?: { state?: ProjectState };
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  const state = record.structuredContent?.state;
+  const text = record.content?.find((item) => item.type === "text")?.text;
+  assert.ok(
+    state,
+    `tool result should include project state (isError=${String(record.isError)} text=${text ?? ""})`,
+  );
   return state;
 }
 
