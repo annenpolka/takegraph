@@ -2669,7 +2669,9 @@ internal sealed partial class Ymm4Facade
             ["realizationId"] = realizationId.ToString("D"),
             ["characterName"] = GetString(item, "CharacterName"),
             ["displayText"] = GetString(item, "Serif"),
-            ["spokenText"] = GetString(item, "Hatsuon", "Serif"),
+            // spokenText is the approved speech input (Serif), not engine Hatsuon.
+            ["spokenText"] = GetString(item, "Serif"),
+            ["hatsuon"] = GetString(item, "Hatsuon"),
             ["pronounceType"] = GetMember(item, "Pronounce")?.GetType().FullName,
             ["voiceParameterType"] = GetMember(item, "VoiceParameter")?.GetType().FullName,
             ["voiceLength"] = GetMember(item, "VoiceLength")?.ToString(),

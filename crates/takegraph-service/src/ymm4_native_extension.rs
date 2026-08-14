@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use takegraph_core::{
     AssetKind, ChangeBudget, ManagedSemanticIdentity, NativeExtensionAction, NativeExtensionIntent,
     NativeExtensionPlan, OpaqueNativeEffect, Patch, PatchError, PatchStatus, PreservedNativeField,
-    RevisionId, ScopeFingerprints, TargetIdentity, canonical_sha256,
+    RevisionId, ScopeFingerprints, TargetIdentity, approval_digests_match, canonical_sha256,
 };
 use takegraph_node::{
     CapabilityRequirement, NativeExtensionNodeError, StructuredYmm4Capabilities, Ymm4BridgeClient,
@@ -241,7 +241,7 @@ impl Ymm4NativeExtensionTask {
             }
             .into());
         }
-        if approved_digest != self.patch.digest {
+        if !approval_digests_match(&self.patch.digest, approved_digest) {
             return Err(Ymm4NativeExtensionError::ApprovalDigestMismatch);
         }
         if self.patch.status == PatchStatus::Previewable {

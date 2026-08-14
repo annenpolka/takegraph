@@ -4,7 +4,15 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   formatAgentError,
+  formatCompositionText,
+  formatDescriptorInventoryText,
+  formatRenderProfilesText,
+  formatStatusText,
+  formatStudioSessionText,
+  formatTaskListText,
+  formatYmm4DescribeText,
   TAKEGRAPH_AGENT_GUIDE,
+  type CanonicalDescribeInput,
 } from "./agent-text.js";
 import type { ProjectSession, ProjectState } from "./project-session.js";
 import {
@@ -512,6 +520,72 @@ const stageInputSchema = z.union([
   reconciliationPreviewSchema,
   reExportStageSchema,
 ]);
+
+const STAGE_KINDS = [
+  "studio_take",
+  "studio_voice_variant",
+  "timeline_edit",
+  "portable_voice",
+  "native_voice",
+  "native_voice_mutation",
+  "native_extension",
+  "project_initialization",
+  "scene_inspection",
+  "checkpoint",
+  "render",
+  "reconciliation",
+  "reconciliation_re_export",
+] as const;
+
+/**
+ * Host-visible object schema for takegraph_task_stage.
+ *
+ * A Zod union/anyOf collapses to `properties: {}` on some MCP hosts, which then
+ * reject every real argument. Runtime validation still uses `stageInputSchema`.
+ */
+const stageHostInputSchema = z.object({
+  kind: z.enum(STAGE_KINDS),
+  takeId: z.string().min(1).optional(),
+  utteranceId: z.string().min(1).optional(),
+  speed: z.number().optional(),
+  intonation: z.number().optional(),
+  operations: z.array(z.record(z.string(), z.unknown())).optional(),
+  maxChangedEntities: z.number().int().positive().optional(),
+  items: z.array(z.record(z.string(), z.unknown())).optional(),
+  entityId: z.string().min(1).optional(),
+  caption: z.string().min(1).optional(),
+  spokenText: z.string().min(1).optional(),
+  speaker: z.string().min(1).optional(),
+  style: z.string().min(1).optional(),
+  frame: z.number().int().min(0).optional(),
+  audioLayer: z.number().int().min(0).optional(),
+  captionLayer: z.number().int().min(0).optional(),
+  displayText: z.string().min(1).optional(),
+  characterName: z.string().min(1).optional(),
+  layer: z.number().int().min(0).optional(),
+  maxLength: z.number().int().positive().optional(),
+  mutations: z.array(z.record(z.string(), z.unknown())).optional(),
+  mode: z.string().min(1).optional(),
+  path: z.string().min(1).optional(),
+  frames: z.array(z.number().int().min(0)).optional(),
+  expectedWidth: z.number().int().positive().optional(),
+  expectedHeight: z.number().int().positive().optional(),
+  profileId: z.string().min(1).optional(),
+  alpha: z.boolean().optional(),
+  maxActualFrameDelta: z.number().int().min(0).optional(),
+  blackLumaThreshold: z.number().int().min(0).max(255).optional(),
+  blackPixelRatioPpm: z.number().int().min(1).max(1_000_000).optional(),
+  blankChannelSpanThreshold: z.number().int().min(0).max(255).optional(),
+  safeArea: pixelRectSchema.nullable().optional(),
+  regions: z.array(z.unknown()).optional(),
+  checkpointOperationId: z.string().uuid().optional(),
+  profile: z.string().min(1).optional(),
+  outputPath: z.string().min(1).optional(),
+  overwrite: z.boolean().optional(),
+  taskId: z.string().min(1).optional(),
+  decisions: z.array(z.unknown()).optional(),
+  manifest: z.record(z.string(), z.unknown()).optional(),
+});
 
 const taskEnvelopeOutputShape = {
   taskId: z.string().min(1),
@@ -1039,14 +1113,15 @@ function errorResult(error: unknown): CallToolResult {
   };
 }
 
-async function canonicalDescription(ymm4: Ymm4Workflow): Promise<UnknownRecord> {
-  const described = (await ymm4.describe()) as UnknownRecord;
-  const safeDescribed = asRecord(modelFacingDetails(described)) ?? {};
+async function rawCanonicalDescription(
+  ymm4: Ymm4Workflow,
+): Promise<CanonicalDescribeInput> {
+  const described = (await ymm4.describe()) as CanonicalDescribeInput;
   try {
     const head = await ymm4.canonicalHead();
-    return { ...safeDescribed, head };
+    return { ...described, head };
   } catch (error) {
-    return { ...safeDescribed, headError: formatAgentError(error) };
+    return { ...described, headError: formatAgentError(error) };
   }
 }
 
@@ -1185,6 +1260,7 @@ function partialComposition(canonical: UnknownRecord): UnknownRecord {
 
 interface SceneDescription {
   canonical: UnknownRecord;
+  rawCanonical: CanonicalDescribeInput;
   composition: UnknownRecord;
   currentFrameObserved: boolean;
 }
@@ -1253,13 +1329,17 @@ async function sceneDescription(ymm4: Ymm4Workflow): Promise<SceneDescription> {
   // Read the ordinary snapshot after the current-frame observation. Matching
   // these independently acquired source fields prevents a stale composition
   // from being combined with a newer canonical inventory.
-  const canonical = await canonicalDescription(ymm4);
+  const rawCanonical = await rawCanonicalDescription(ymm4);
+  const canonical =
+    (asRecord(modelFacingDetails(rawCanonical)) as UnknownRecord | undefined) ?? {};
+  const bindingSource = (asRecord(rawCanonical) as UnknownRecord | undefined) ?? canonical;
   if (observed) {
-    const mismatches = compositionBindingMismatches(canonical, observed);
+    const mismatches = compositionBindingMismatches(bindingSource, observed);
     if (mismatches.length === 0) {
       return {
         canonical,
-        composition: boundCurrentFrameComposition(canonical, observed),
+        rawCanonical,
+        composition: boundCurrentFrameComposition(bindingSource, observed),
         currentFrameObserved: true,
       };
     }
@@ -1270,6 +1350,7 @@ async function sceneDescription(ymm4: Ymm4Workflow): Promise<SceneDescription> {
 
   return {
     canonical,
+    rawCanonical,
     composition: {
       ...partialComposition(canonical),
       observationStatus: "current_frame_unavailable",
@@ -2330,7 +2411,12 @@ export function registerFacadeTools(
         if (view === "studio") {
           const studio = options.session.snapshot();
           return {
-            content: [{ type: "text", text: `Studio session revision ${studio.revision}.` }],
+            content: [
+              {
+                type: "text",
+                text: formatStudioSessionText(studio, "Studio session inventory."),
+              },
+            ],
             structuredContent: { view, studio },
           };
         }
@@ -2340,23 +2426,26 @@ export function registerFacadeTools(
           const scene = wantsComposition
             ? await sceneDescription(options.ymm4)
             : undefined;
+          const rawCanonical =
+            scene?.rawCanonical ?? (await rawCanonicalDescription(options.ymm4));
           const canonical =
-            scene?.canonical ?? (await canonicalDescription(options.ymm4));
+            scene?.canonical ??
+            ((asRecord(modelFacingDetails(rawCanonical)) ?? {}) as UnknownRecord);
           const structured = scene
             ? { view, canonical, composition: scene.composition }
             : { view, canonical };
+          const text =
+            view === "scene"
+              ? [
+                  scene?.currentFrameObserved
+                    ? "Source-bound current-frame scene observation returned. Unavailable geometry was not inferred."
+                    : "Timeline scene observation returned. Current-frame geometry unavailable from the bridge is explicit and was not inferred.",
+                  formatYmm4DescribeText(rawCanonical),
+                  formatCompositionText(scene?.composition ?? {}),
+                ].join("\n\n")
+              : formatYmm4DescribeText(rawCanonical);
           return {
-            content: [
-              {
-                type: "text",
-                text:
-                  view === "scene"
-                    ? scene?.currentFrameObserved
-                      ? "Source-bound current-frame scene observation returned. Unavailable geometry was not inferred."
-                      : "Timeline scene observation returned. Current-frame geometry unavailable from the bridge is explicit and was not inferred."
-                    : "Canonical YMM4/project-store inventory returned.",
-              },
-            ],
+            content: [{ type: "text", text }],
             structuredContent: structured,
           };
         }
@@ -2366,16 +2455,22 @@ export function registerFacadeTools(
             options.ymm4.renderProfiles(),
           ]);
           return {
-            content: [{ type: "text", text: "Native-extension and render catalogs returned." }],
+            content: [
+              {
+                type: "text",
+                text: [
+                  formatDescriptorInventoryText(nativeExtensions),
+                  formatRenderProfilesText(renderProfiles),
+                ].join("\n\n"),
+              },
+            ],
             structuredContent: { view, nativeExtensions, renderProfiles },
           };
         }
         if (view === "tasks") {
           const tasks = options.registry.list();
           return {
-            content: [
-              { type: "text", text: `${tasks.length} facade task envelope(s) cached.` },
-            ],
+            content: [{ type: "text", text: formatTaskListText(tasks) }],
             structuredContent: { view, tasks },
           };
         }
@@ -2455,16 +2550,18 @@ export function registerFacadeTools(
 
         const studio = options.session.snapshot();
         try {
+          const rawCanonical = await rawCanonicalDescription(options.ymm4);
           const scene = include.includes("composition")
             ? await sceneDescription(options.ymm4)
             : undefined;
           const canonical =
-            scene?.canonical ?? (await canonicalDescription(options.ymm4));
+            scene?.canonical ??
+            ((asRecord(modelFacingDetails(rawCanonical)) ?? {}) as UnknownRecord);
           return {
             content: [
               {
                 type: "text",
-                text: `TakeGraph overview: studio revision ${studio.revision}; canonical inventory available.`,
+                text: formatStatusText({ studio, canonical: rawCanonical }),
               },
             ],
             structuredContent: {
@@ -2480,7 +2577,10 @@ export function registerFacadeTools(
             content: [
               {
                 type: "text",
-                text: `TakeGraph overview: studio revision ${studio.revision}; canonical inventory unavailable: ${formatAgentError(error)}`,
+                text: formatStatusText({
+                  studio,
+                  canonicalError: formatAgentError(error),
+                }),
               },
             ],
             structuredContent: {
@@ -2503,13 +2603,13 @@ export function registerFacadeTools(
       title: "Stage TakeGraph task",
       description:
         "Create an immutable candidate, observation, or digest-bound plan through its owning store. timeline_edit accepts 1-128 ordered portable and native voice creates in one atomic managed-cue plan. Native extensions remain on their separate guarded task kind. Staging never substitutes for approval or execution.",
-      inputSchema: stageInputSchema,
+      inputSchema: stageHostInputSchema,
       outputSchema: taskEnvelopeOutputShape,
       annotations: { destructiveHint: false },
     },
     async (input) => {
       try {
-        return await stageTask(options, input);
+        return await stageTask(options, stageInputSchema.parse(input));
       } catch (error) {
         return errorResult(error);
       }

@@ -1420,6 +1420,53 @@ internal sealed partial class Ymm4Facade
         }
     }
 
+    internal static void RequireAllowedJsonProperties(
+        JsonElement value,
+        params string[] allowedNames)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new BridgeValidationException(
+                "Native-extension JSON value must be an object");
+        }
+        var allowed = allowedNames.ToHashSet(StringComparer.Ordinal);
+        foreach (var property in value.EnumerateObject())
+        {
+            if (!allowed.Contains(property.Name))
+            {
+                throw new BridgeValidationException(
+                    $"Unknown native-extension JSON property: {property.Name}");
+            }
+        }
+    }
+
+    internal static string RequireOneJsonAlias(
+        JsonElement value,
+        string description,
+        params string[] aliases)
+    {
+        string? chosen = null;
+        foreach (var alias in aliases)
+        {
+            if (!value.TryGetProperty(alias, out _))
+            {
+                continue;
+            }
+            if (chosen is not null)
+            {
+                throw new BridgeValidationException(
+                    $"{description} must use exactly one of {string.Join(", ", aliases)}");
+            }
+            chosen = alias;
+        }
+        if (chosen is null)
+        {
+            throw new BridgeValidationException(
+                $"Missing {description}; expected one of {string.Join(", ", aliases)}");
+        }
+        return chosen;
+    }
+
     private static void RequireDistinctLogicalKeys(
         IReadOnlyList<ParsedNativeExtensionIntent> intents)
     {

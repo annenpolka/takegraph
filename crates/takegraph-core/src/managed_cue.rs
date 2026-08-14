@@ -642,6 +642,33 @@ pub fn canonical_sha256<T: Serialize + ?Sized>(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+/// Compares approval-bound SHA-256 digests.
+///
+/// Callers may present either the canonical `sha256:<hex>` form or the bare
+/// 64-character hex. Other opaque tokens still require an exact match.
+#[must_use]
+pub fn approval_digests_match(stored: &str, presented: &str) -> bool {
+    if stored == presented {
+        return true;
+    }
+    match (sha256_hex(stored), sha256_hex(presented)) {
+        (Some(left), Some(right)) => left == right,
+        _ => stored.eq_ignore_ascii_case(presented),
+    }
+}
+
+fn sha256_hex(value: &str) -> Option<String> {
+    let hex = value
+        .strip_prefix("sha256:")
+        .or_else(|| value.strip_prefix("SHA256:"))
+        .unwrap_or(value);
+    if hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 fn write_canonical_json(value: &Value, output: &mut Vec<u8>) -> Result<(), serde_json::Error> {
     match value {
         Value::Null => output.extend_from_slice(b"null"),
@@ -819,5 +846,18 @@ mod tests {
             canonical_sha256("test", &left).unwrap(),
             canonical_sha256("test", &right).unwrap()
         );
+    }
+
+    #[test]
+    fn approval_digests_match_optional_sha256_prefix() {
+        let hex = "a".repeat(64);
+        let prefixed = format!("sha256:{hex}");
+        assert!(approval_digests_match(&prefixed, &hex));
+        assert!(approval_digests_match(&hex, &prefixed));
+        assert!(approval_digests_match(&prefixed, &prefixed));
+        assert!(approval_digests_match(&hex, &hex.to_ascii_uppercase()));
+        assert!(!approval_digests_match(&prefixed, &"b".repeat(64)));
+        assert!(approval_digests_match("opaque-token", "opaque-token"));
+        assert!(!approval_digests_match("opaque-token", "other-token"));
     }
 }

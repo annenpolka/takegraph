@@ -20,7 +20,7 @@ use takegraph_core::{
     PortraitPresentation, ProjectInitializationMode, ProjectInitializationPlan,
     ProjectInitializationPlanError, ProjectInitializationSource, ReconciliationAction,
     ReconciliationDecision, ReconciliationError, ReconciliationPreview, ReconciliationSource,
-    RevisionId, SemanticDriftReport, canonical_sha256,
+    RevisionId, SemanticDriftReport, approval_digests_match, canonical_sha256,
 };
 use takegraph_node::{
     CapabilityRequirement, ManagedUtterance, MetadataDetachNodeError, ProjectOperationNodeError,
@@ -1198,11 +1198,15 @@ impl ProjectOperationStore {
     ) -> Result<DurableTaskRecord<ProjectInitializationTaskRecord>, ProjectOperationError> {
         let mut durable = self.project_initialization_status(operation_id)?;
         durable.payload.plan.verify()?;
-        if approved_plan_digest != durable.payload.plan.plan_digest {
+        if !approval_digests_match(&durable.payload.plan.plan_digest, approved_plan_digest) {
             return Err(ProjectOperationError::ProjectInitializationApprovalMismatch);
         }
         if durable.payload.status == ProjectInitializationTaskStatus::Approved
-            && durable.payload.approved_plan_digest.as_deref() == Some(approved_plan_digest)
+            && durable
+                .payload
+                .approved_plan_digest
+                .as_ref()
+                .is_some_and(|stored| approval_digests_match(stored, approved_plan_digest))
         {
             return Ok(durable);
         }
@@ -1213,7 +1217,7 @@ impl ProjectOperationStore {
                 ),
             );
         }
-        durable.payload.approved_plan_digest = Some(approved_plan_digest.into());
+        durable.payload.approved_plan_digest = Some(durable.payload.plan.plan_digest.clone());
         durable.payload.status = ProjectInitializationTaskStatus::Approved;
         durable.payload.error = None;
         self.append_project_initialization(&durable.payload, Some(durable.generation))
@@ -2083,7 +2087,7 @@ impl ProjectOperationStore {
             return Err(ProjectOperationError::WrongReconciliationChildKind);
         };
         require_revision(canonical, draft.source.source_revision)?;
-        if approved_digest != draft.patch.digest {
+        if !approval_digests_match(&draft.patch.digest, approved_digest) {
             return Err(ProjectOperationError::ReconciliationChildApprovalMismatch);
         }
         if draft.status == ReconciliationDetachStatus::Approved {

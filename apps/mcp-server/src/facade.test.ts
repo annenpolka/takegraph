@@ -171,6 +171,12 @@ test("default tool inventory exposes five model facades and app-only Studio tool
     const tool = listed.tools.find((candidate) => candidate.name === name);
     assert.notEqual(tool?.annotations?.destructiveHint, true, `${name} must plan only`);
   }
+  const stage = listed.tools.find((tool) => tool.name === "takegraph_task_stage");
+  const stageProperties = (stage?.inputSchema.properties ?? {}) as Record<string, unknown>;
+  assert.ok(stageProperties.kind, "takegraph_task_stage must publish kind");
+  assert.ok(stageProperties.operations, "takegraph_task_stage must publish operations");
+  assert.ok(stageProperties.mode, "takegraph_task_stage must publish mode");
+  assert.ok(stageProperties.path, "takegraph_task_stage must publish path");
   for (const name of ["takegraph_task_execute", "takegraph_task_decide"] as const) {
     const tool = listed.tools.find((candidate) => candidate.name === name);
     assert.equal(tool?.annotations?.destructiveHint, true, `${name} is a write boundary`);
@@ -282,6 +288,9 @@ test("overview inspection reports both stores through the single read facade", a
     ),
     false,
   );
+  assert.match(textFrom(inspected), /sessionRevision: 4/);
+  assert.match(textFrom(inspected), /canonicalRevision: 9/);
+  assert.match(textFrom(inspected), /YMM4 Project/);
 });
 
 test("studio_take stages and executes only with its exact plan digest", async (t) => {

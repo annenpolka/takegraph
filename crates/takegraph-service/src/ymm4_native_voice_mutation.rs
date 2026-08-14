@@ -2,7 +2,8 @@ use std::{collections::HashSet, path::Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use takegraph_core::{
-    CanonicalError, Patch, PatchError, PatchStatus, RevisionId, canonical_sha256,
+    CanonicalError, Patch, PatchError, PatchStatus, RevisionId, approval_digests_match,
+    canonical_sha256,
 };
 use takegraph_node::{
     ArtifactError, CapabilityRequirement, ImportedYmm4NativeVoiceArtifact, ManagedItemKind,
@@ -267,7 +268,7 @@ impl Ymm4NativeVoiceMutationPatch {
         current_head: RevisionId,
     ) -> Result<(), Ymm4NativeVoiceMutationError> {
         self.validate_payload_digest()?;
-        if approved_digest != self.patch.digest {
+        if !approval_digests_match(&self.patch.digest, approved_digest) {
             return Err(Ymm4NativeVoiceMutationError::DigestMismatch);
         }
         if self.patch.status == PatchStatus::Previewable {

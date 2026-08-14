@@ -264,6 +264,7 @@ fn validate_ymm4_provenance_binding(
 ) -> Result<(), ArtifactError> {
     if query.get("characterName").and_then(Value::as_str) != Some(character_name)
         || query.get("displayText").and_then(Value::as_str) != Some(display_text)
+        // spokenText is the approved speech input (YMM4 Serif), not engine Hatsuon.
         || query.get("spokenText").and_then(Value::as_str) != Some(spoken_text)
     {
         return Err(ArtifactError::ArtifactSemanticMismatch(
