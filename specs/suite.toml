@@ -1,6 +1,135 @@
 schema_version = 1
 
 [[property]]
+id = "ANN-001"
+module = "annotationPromotionProtocol"
+expression = "captureEvidenceIsImmutable"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/annotation.rs",
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "ANN-002"
+module = "annotationPromotionProtocol"
+expression = "transcriptBindsAudioEvidence"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/annotation.rs",
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "ASR engine behavior remains an integration boundary."
+
+[[property]]
+id = "ANN-003"
+module = "annotationPromotionProtocol"
+expression = "interpretationBindsTranscript"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/annotation.rs",
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "LLM interpretation quality remains an integration boundary."
+
+[[property]]
+id = "ANN-004"
+module = "annotationPromotionProtocol"
+expression = "promotionBindsInterpretation"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/annotation_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "ANN-005"
+module = "annotationPromotionProtocol"
+expression = "canonicalHeadTracksVerifiedCommits"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "ANN-006"
+module = "annotationPromotionProtocol"
+expression = "failedTranscriptionPreservesEvidence"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/annotation_store.rs",
+  "crates/takegraph-node/src/transcription.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Capture-host crash recovery remains an integration boundary."
+
+[[property]]
+id = "ANN-007"
+module = "annotationPromotionProtocol"
+expression = "staleSourceBlocksStagedPromotion"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/annotation.rs",
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "ANN-008"
+module = "annotationPromotionProtocol"
+expression = "dismissedCapturesNeverPromote"
+owner = "takegraph-core"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-core/src/annotation.rs",
+  "crates/takegraph-service/src/annotation_store.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "none"
+
+[[property]]
+id = "ANN-009"
+module = "annotationPromotionProtocol"
+expression = "promotionExecutesAtMostOnce"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/annotation_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Bridge at-most-once application remains specified by the YMM4 apply protocol."
+
+[[property]]
+id = "ANN-010"
+module = "annotationPromotionProtocol"
+expression = "promotedRevisionFollowsVerifiedBase"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "crates/takegraph-service/src/annotation_store.rs",
+  "crates/takegraph-service/src/ymm4_timeline_edit.rs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Verified read-back mechanics remain owned by the YMM4 apply protocol."
+
+[[property]]
 id = "REV-001"
 module = "patchProtocol"
 expression = "approvalIsFresh"

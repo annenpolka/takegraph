@@ -59,6 +59,17 @@ const protocols = [
     runs: [{ main: "agentReportProtocol", invariant: "safety" }],
   },
   {
+    file: "specs/protocols/annotation_promotion_protocol.qnt",
+    group: "core",
+    runs: [
+      {
+        main: "annotationPromotionProtocol",
+        invariant: "safety",
+        test: true,
+      },
+    ],
+  },
+  {
     file: "specs/protocols/ymm4_change_set_protocol.qnt",
     group: "change-set",
     runs: [
