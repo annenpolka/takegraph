@@ -24,6 +24,11 @@ pnpm spec:run       # Random exploration of patch invariants
 pnpm verify         # All of the above
 ```
 
+CI runs the same checks as parallel jobs instead of one `pnpm verify` on
+Windows. Linux owns Quint, rustfmt, clippy, and TypeScript; Windows owns Rust
+tests, MCP/view tests, and the contract-stub bridge tests. Quint typecheck
+runs once, then exploration runs in parallel. Sample count stays 1000.
+
 For the UI, `pnpm dev:view` opens a standalone adapter with sample data.
 Embedded hosts use the same UI through `McpAppsHostBridge`; its mutations call
 MCP tools and never write canonical project state directly. `pnpm test` builds
