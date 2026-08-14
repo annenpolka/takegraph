@@ -443,7 +443,10 @@ internal static class ApplyRequestDigest
             AppendNumber(canonical, "revision", cue.Revision);
             AppendString(canonical, "characterName", cue.CharacterName);
             AppendString(canonical, "displayText", cue.DisplayText);
-            AppendString(canonical, "spokenText", cue.SpokenText);
+            if (cue.SpokenText is not null)
+            {
+                AppendString(canonical, "spokenText", cue.SpokenText);
+            }
             AppendNumber(canonical, "frame", cue.Frame);
             AppendNumber(canonical, "layer", cue.Layer);
             AppendNumber(canonical, "maxLength", cue.MaxLength);
@@ -513,7 +516,10 @@ internal static class ApplyRequestDigest
             AppendNumber(canonical, "revision", mutation.Revision);
             AppendString(canonical, "characterName", mutation.CharacterName);
             AppendString(canonical, "displayText", mutation.DisplayText);
-            AppendString(canonical, "spokenText", mutation.SpokenText);
+            if (mutation.SpokenText is not null)
+            {
+                AppendString(canonical, "spokenText", mutation.SpokenText);
+            }
             AppendNumber(canonical, "frame", mutation.Frame);
             AppendNumber(canonical, "layer", mutation.Layer);
             AppendNumber(canonical, "maxLength", mutation.MaxLength);

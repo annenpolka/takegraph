@@ -2700,6 +2700,12 @@ mod tests {
                         ManagedSemanticValue::Text(text) => Some(text.clone()),
                         _ => None,
                     }),
+                    spoken_text: item.owned_fields.get("spokenText").and_then(
+                        |value| match value {
+                            ManagedSemanticValue::Text(text) => Some(text.clone()),
+                            _ => None,
+                        },
+                    ),
                     audio_path: None,
                     artifact_hash: None,
                     speaker: None,

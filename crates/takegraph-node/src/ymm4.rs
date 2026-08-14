@@ -90,6 +90,14 @@ pub enum Ymm4Capability {
     ProjectRender,
     ProjectRenderCancel,
     ProjectRenderMediaReceipt,
+    EditSurfaceAdmit,
+    CompositionGraphApply,
+    ProjectSettingsMutation,
+    ProjectSceneMutation,
+    ProjectTimelineMutation,
+    ProjectCharacterMutation,
+    ProjectTemplateDefinitionEdit,
+    EditTransactionApply,
     #[serde(other)]
     Unknown,
 }
@@ -104,6 +112,8 @@ pub struct Ymm4ManagedItem {
     pub layer: i32,
     pub length: i32,
     pub text: Option<String>,
+    #[serde(default)]
+    pub spoken_text: Option<String>,
     pub audio_path: Option<String>,
     pub artifact_hash: Option<String>,
     #[serde(default)]
@@ -598,7 +608,8 @@ pub struct Ymm4NativeVoiceCue {
     pub revision: u64,
     pub character_name: String,
     pub display_text: String,
-    pub spoken_text: String,
+    #[serde(default)]
+    pub spoken_text: Option<String>,
     pub frame: i32,
     pub layer: i32,
     pub max_length: i32,
@@ -613,7 +624,8 @@ pub struct Ymm4NativeVoiceMutation {
     pub revision: u64,
     pub character_name: String,
     pub display_text: String,
-    pub spoken_text: String,
+    #[serde(default)]
+    pub spoken_text: Option<String>,
     pub frame: i32,
     pub layer: i32,
     pub max_length: i32,
@@ -1183,7 +1195,9 @@ fn native_voice_apply_request_digest(
         let _ = writeln!(canonical, "revision:{}", cue.revision);
         write_string(&mut canonical, "characterName", &cue.character_name);
         write_string(&mut canonical, "displayText", &cue.display_text);
-        write_string(&mut canonical, "spokenText", &cue.spoken_text);
+        if let Some(spoken) = &cue.spoken_text {
+            write_string(&mut canonical, "spokenText", spoken);
+        }
         let _ = writeln!(canonical, "frame:{}", cue.frame);
         let _ = writeln!(canonical, "layer:{}", cue.layer);
         let _ = writeln!(canonical, "maxLength:{}", cue.max_length);
@@ -1270,7 +1284,9 @@ fn native_voice_mutation_apply_request_digest(
         let _ = writeln!(canonical, "revision:{}", mutation.revision);
         write_string(&mut canonical, "characterName", &mutation.character_name);
         write_string(&mut canonical, "displayText", &mutation.display_text);
-        write_string(&mut canonical, "spokenText", &mutation.spoken_text);
+        if let Some(spoken) = &mutation.spoken_text {
+            write_string(&mut canonical, "spokenText", spoken);
+        }
         let _ = writeln!(canonical, "frame:{}", mutation.frame);
         let _ = writeln!(canonical, "layer:{}", mutation.layer);
         let _ = writeln!(canonical, "maxLength:{}", mutation.max_length);
@@ -1980,7 +1996,7 @@ mod tests {
             revision: 4,
             character_name: "春日部つむぎ".into(),
             display_text: "ここから第二形態です".into(),
-            spoken_text: "ここから第二形態です".into(),
+            spoken_text: Some("ここから第二形態です".into()),
             frame: 120,
             layer: 20,
             max_length: 180,
@@ -1994,7 +2010,7 @@ mod tests {
             revision: 4,
             character_name: "春日部つむぎ".into(),
             display_text: "ここから第二形態です".into(),
-            spoken_text: "ここから第二形態です".into(),
+            spoken_text: Some("ここから第二形態です".into()),
             frame: 120,
             layer: 20,
             max_length: 180,

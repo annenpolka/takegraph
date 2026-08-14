@@ -182,6 +182,7 @@ fn normalized_features(
     insert_scene_capture_feature(&mut features, raw)?;
     insert_scene_composition_feature(&mut features, raw)?;
     insert_native_extension_features(&mut features, raw)?;
+    insert_edit_contract_features(&mut features, raw)?;
     insert_feature(
         &mut features,
         "readback.semantic",
@@ -190,6 +191,94 @@ fn normalized_features(
     )?;
     insert_project_output_features(&mut features, raw)?;
     Ok(features)
+}
+
+fn insert_edit_contract_features(
+    features: &mut BTreeMap<String, FeatureDescriptor>,
+    raw: &Ymm4Capabilities,
+) -> Result<(), CanonicalError> {
+    let has = |capability| raw.capabilities.contains(&capability);
+    insert_feature(
+        features,
+        "editSurface.admit",
+        has(Ymm4Capability::EditSurfaceAdmit),
+        [
+            ("exactTouchedReadback", CapabilityValue::Boolean(true)),
+            ("normalizePatchForms", CapabilityValue::Boolean(true)),
+            ("unknownFieldWritable", CapabilityValue::Boolean(false)),
+        ],
+    )?;
+    insert_feature(
+        features,
+        "compositionGraph.apply",
+        has(Ymm4Capability::CompositionGraphApply),
+        [
+            (
+                "paintOrderIndependentOfEffects",
+                CapabilityValue::Boolean(true),
+            ),
+            ("referenceSafeDelete", CapabilityValue::Boolean(true)),
+            ("unknownKindFailsClosed", CapabilityValue::Boolean(true)),
+        ],
+    )?;
+    insert_feature(
+        features,
+        "projectEdit.settings",
+        has(Ymm4Capability::ProjectSettingsMutation),
+        [
+            (
+                "settingTaxonomy",
+                CapabilityValue::Text(
+                    "canvas,frame_rate,audio_sample_rate,background_color,timeline_layer_policy"
+                        .into(),
+                ),
+            ),
+            ("noOpAdvancesRevision", CapabilityValue::Boolean(false)),
+        ],
+    )?;
+    insert_feature(
+        features,
+        "projectEdit.scene",
+        has(Ymm4Capability::ProjectSceneMutation),
+        [("referencedDelete", CapabilityValue::Text("reject".into()))],
+    )?;
+    insert_feature(
+        features,
+        "projectEdit.timeline",
+        has(Ymm4Capability::ProjectTimelineMutation),
+        [("referencedDelete", CapabilityValue::Text("reject".into()))],
+    )?;
+    insert_feature(
+        features,
+        "projectEdit.character",
+        has(Ymm4Capability::ProjectCharacterMutation),
+        [
+            (
+                "unknownDependentsFailClosed",
+                CapabilityValue::Boolean(true),
+            ),
+            (
+                "updateExactlyOneSettingClass",
+                CapabilityValue::Boolean(true),
+            ),
+        ],
+    )?;
+    insert_feature(
+        features,
+        "projectEdit.templateDefinition",
+        has(Ymm4Capability::ProjectTemplateDefinitionEdit),
+        [("definitionEdits", CapabilityValue::Boolean(false))],
+    )?;
+    insert_feature(
+        features,
+        "editTransaction.apply",
+        has(Ymm4Capability::EditTransactionApply),
+        [
+            ("laterTaskStaleAfterCommit", CapabilityValue::Boolean(true)),
+            ("maxOperations", CapabilityValue::Integer(128)),
+            ("unifiedEndpointOnly", CapabilityValue::Boolean(true)),
+        ],
+    )
 }
 
 fn insert_project_output_features(
@@ -336,7 +425,7 @@ fn insert_voice_features(
             ("prepare", CapabilityValue::Boolean(false)),
             (
                 "separateDisplayAndSpokenText",
-                CapabilityValue::Boolean(false),
+                CapabilityValue::Boolean(true),
             ),
             (
                 "durationResolution",
@@ -357,7 +446,7 @@ fn insert_voice_features(
             ("identityCarrier", CapabilityValue::Text("remark".into())),
             (
                 "separateDisplayAndSpokenText",
-                CapabilityValue::Boolean(false),
+                CapabilityValue::Boolean(true),
             ),
             (
                 "durationResolution",
@@ -633,7 +722,7 @@ mod tests {
         );
         assert_eq!(
             voice.properties["separateDisplayAndSpokenText"],
-            CapabilityValue::Boolean(false)
+            CapabilityValue::Boolean(true)
         );
         assert_eq!(
             voice.properties["artifactExportAvailable"],
@@ -810,9 +899,82 @@ mod tests {
             ],
         };
         let capabilities = StructuredYmm4Capabilities::from_bridge(&health(), &raw).unwrap();
+        assert!(!capabilities.feature("editSurface.admit").unwrap().available);
+        assert!(
+            !capabilities
+                .feature("compositionGraph.apply")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !capabilities
+                .feature("projectEdit.settings")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !capabilities
+                .feature("projectEdit.templateDefinition")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !capabilities
+                .feature("editTransaction.apply")
+                .unwrap()
+                .available
+        );
         assert_eq!(
             capabilities.capability_digest,
-            "sha256:d5e733421b19ff855abed7bc9a7bd08c13543411ae8245835c24d17d14465a96"
+            "sha256:8a58fd233893233f43799a1aa0e63b1d1132d4229fa833f622467b382c71e8d5"
         );
+    }
+
+    #[test]
+    fn quint_edit_contracts_stay_unavailable_until_bridge_advertises_them() {
+        let raw = Ymm4Capabilities {
+            protocol_version: 2,
+            capabilities: vec![Ymm4Capability::MutationProfileYmm4_4_55_1_1],
+        };
+        let off = StructuredYmm4Capabilities::from_bridge(&health(), &raw).unwrap();
+        for feature in [
+            "editSurface.admit",
+            "compositionGraph.apply",
+            "projectEdit.settings",
+            "projectEdit.scene",
+            "projectEdit.timeline",
+            "projectEdit.character",
+            "projectEdit.templateDefinition",
+            "editTransaction.apply",
+        ] {
+            assert!(
+                !off.feature(feature).unwrap().available,
+                "{feature} must stay fail-closed"
+            );
+        }
+
+        let advertised = Ymm4Capabilities {
+            protocol_version: 2,
+            capabilities: vec![
+                Ymm4Capability::EditSurfaceAdmit,
+                Ymm4Capability::CompositionGraphApply,
+                Ymm4Capability::ProjectSettingsMutation,
+                Ymm4Capability::ProjectSceneMutation,
+                Ymm4Capability::ProjectTimelineMutation,
+                Ymm4Capability::ProjectCharacterMutation,
+                Ymm4Capability::EditTransactionApply,
+            ],
+        };
+        let on = StructuredYmm4Capabilities::from_bridge(&health(), &advertised).unwrap();
+        assert!(on.feature("editSurface.admit").unwrap().available);
+        assert!(on.feature("compositionGraph.apply").unwrap().available);
+        assert!(on.feature("projectEdit.settings").unwrap().available);
+        assert!(on.feature("editTransaction.apply").unwrap().available);
+        assert!(
+            !on.feature("projectEdit.templateDefinition")
+                .unwrap()
+                .available
+        );
+        assert_ne!(off.capability_digest, on.capability_digest);
     }
 }

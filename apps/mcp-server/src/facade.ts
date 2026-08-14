@@ -126,12 +126,14 @@ const sceneRegionSchema = z.object({
   minimumEdgeClearancePx: z.number().int().min(0).default(0),
 });
 
+const optionalSpokenText = z.string().min(1).optional();
+
 const nativeVoiceMutationWriteFields = {
   entityId: z.string().min(1),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   characterName: z.string().min(1),
   displayText: z.string().min(1),
-  spokenText: z.string().min(1),
+  spokenText: optionalSpokenText,
   frame: z.number().int().min(0),
   layer: z.number().int().min(0),
   maxLength: z.number().int().positive(),
@@ -155,17 +157,7 @@ const nativeVoiceMutationSchema = z
       entityId: z.string().min(1),
       revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
     }),
-  ])
-  .superRefine((value, context) => {
-    if (value.action !== "delete" && value.displayText !== value.spokenText) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "displayText and spokenText must be identical for YMM4 native voice create/update",
-        path: ["spokenText"],
-      });
-    }
-  });
+  ]);
 
 const nativeDescriptorBindingFields = {
   descriptorId: z.string().min(1),
@@ -319,20 +311,11 @@ const nativeVoiceItemSchema = z
   .object({
     entityId: z.string().min(1),
     displayText: z.string().min(1),
-    spokenText: z.string().min(1),
+    spokenText: optionalSpokenText,
     characterName: z.string().min(1),
     frame: z.number().int().min(0),
     layer: z.number().int().min(0),
     maxLength: z.number().int().positive(),
-  })
-  .superRefine((value, context) => {
-    if (value.displayText !== value.spokenText) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "displayText and spokenText must be identical",
-        path: ["spokenText"],
-      });
-    }
   });
 
 const nativeVoiceStageSchema = z.union([
@@ -356,19 +339,11 @@ const nativeVoiceStageSchema = z.union([
     kind: z.literal("native_voice"),
     entityId: z.string().min(1),
     displayText: z.string().min(1),
-    spokenText: z.string().min(1),
+    spokenText: optionalSpokenText,
     characterName: z.string().min(1),
     frame: z.number().int().min(0),
     layer: z.number().int().min(0),
     maxLength: z.number().int().positive(),
-  }).superRefine((value, context) => {
-    if (value.displayText !== value.spokenText) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "displayText and spokenText must be identical",
-        path: ["spokenText"],
-      });
-    }
   }),
 ]);
 
@@ -392,19 +367,11 @@ const timelineEditOperationSchema = z.discriminatedUnion("op", [
     op: z.literal("native_voice_create"),
     entityId: z.string().min(1),
     displayText: z.string().min(1),
-    spokenText: z.string().min(1),
+    spokenText: optionalSpokenText,
     characterName: z.string().min(1),
     frame: z.number().int().min(0),
     layer: z.number().int().min(0),
     maxLength: z.number().int().positive(),
-  }).superRefine((value, context) => {
-    if (value.displayText !== value.spokenText) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "displayText and spokenText must be identical",
-        path: ["spokenText"],
-      });
-    }
   }),
 ]);
 

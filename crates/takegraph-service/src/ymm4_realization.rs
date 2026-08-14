@@ -51,8 +51,16 @@ fn normalize_native_voice(
         .as_deref()
         .unwrap_or(&cue.intent.speaker_role);
     let actual_length = validate_common_item(cue, item)?;
+    let spoken_mismatch = match cue.intent.spoken_text.as_deref() {
+        Some(spoken) => item.spoken_text.as_deref() != Some(spoken),
+        None => item
+            .spoken_text
+            .as_deref()
+            .is_none_or(|observed| observed.trim().is_empty()),
+    };
     if item.kind != ManagedItemKind::Voice
         || item.text.as_deref() != Some(cue.intent.display_text.as_str())
+        || spoken_mismatch
         || item.speaker.as_deref() != Some(expected_speaker)
     {
         return Err(RealizationReadbackError::SemanticMismatch(
@@ -70,6 +78,7 @@ fn normalize_native_voice(
             "layer": item.layer,
             "length": item.length,
             "text": item.text,
+            "spokenText": item.spoken_text,
             "speaker": item.speaker,
         }),
     )?;
@@ -352,6 +361,7 @@ mod tests {
             layer: 20,
             length: 80,
             text: Some("第二形態だぜ".into()),
+            spoken_text: Some("第二形態だぜ".into()),
             audio_path: None,
             artifact_hash: None,
             speaker: Some("marisa".into()),
@@ -370,6 +380,7 @@ mod tests {
                 layer: 20,
                 length: 40,
                 text: None,
+                spoken_text: None,
                 audio_path: Some("audio.wav".into()),
                 artifact_hash: Some("a".repeat(64)),
                 speaker: None,
@@ -383,6 +394,7 @@ mod tests {
                 layer: 21,
                 length: 40,
                 text: Some("第二形態だぜ".into()),
+                spoken_text: None,
                 audio_path: None,
                 artifact_hash: Some("a".repeat(64)),
                 speaker: None,

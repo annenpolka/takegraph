@@ -905,7 +905,7 @@ internal sealed partial class Ymm4Facade
                 ["durationResolution"] = "bounded",
                 ["identityCarrier"] = "remark",
                 ["prepare"] = false,
-                ["separateDisplayAndSpokenText"] = false,
+                ["separateDisplayAndSpokenText"] = true,
             });
         AddStructuredFeature(
             features,
@@ -919,7 +919,7 @@ internal sealed partial class Ymm4Facade
                 ["identityCarrier"] = "remark",
                 ["mutationMode"] = "replace_preserving_user_state",
                 ["preservedStateVerified"] = true,
-                ["separateDisplayAndSpokenText"] = false,
+                ["separateDisplayAndSpokenText"] = true,
             });
         AddStructuredFeature(
             features,
@@ -1001,6 +1001,79 @@ internal sealed partial class Ymm4Facade
                     ["unknownEffectsPreserved"] = true,
                 });
         }
+        AddStructuredFeature(
+            features,
+            "editSurface.admit",
+            has("edit_surface_admit"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["exactTouchedReadback"] = true,
+                ["normalizePatchForms"] = true,
+                ["unknownFieldWritable"] = false,
+            });
+        AddStructuredFeature(
+            features,
+            "compositionGraph.apply",
+            has("composition_graph_apply"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["paintOrderIndependentOfEffects"] = true,
+                ["referenceSafeDelete"] = true,
+                ["unknownKindFailsClosed"] = true,
+            });
+        AddStructuredFeature(
+            features,
+            "projectEdit.settings",
+            has("project_settings_mutation"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["noOpAdvancesRevision"] = false,
+                ["settingTaxonomy"] =
+                    "canvas,frame_rate,audio_sample_rate,background_color,timeline_layer_policy",
+            });
+        AddStructuredFeature(
+            features,
+            "projectEdit.scene",
+            has("project_scene_mutation"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["referencedDelete"] = "reject",
+            });
+        AddStructuredFeature(
+            features,
+            "projectEdit.timeline",
+            has("project_timeline_mutation"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["referencedDelete"] = "reject",
+            });
+        AddStructuredFeature(
+            features,
+            "projectEdit.character",
+            has("project_character_mutation"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["unknownDependentsFailClosed"] = true,
+                ["updateExactlyOneSettingClass"] = true,
+            });
+        AddStructuredFeature(
+            features,
+            "projectEdit.templateDefinition",
+            has("project_template_definition_edit"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["definitionEdits"] = false,
+            });
+        AddStructuredFeature(
+            features,
+            "editTransaction.apply",
+            has("edit_transaction_apply"),
+            new SortedDictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["laterTaskStaleAfterCommit"] = true,
+                ["maxOperations"] = 128L,
+                ["unifiedEndpointOnly"] = true,
+            });
         AddStructuredFeature(
             features,
             "readback.semantic",
@@ -1120,6 +1193,17 @@ internal sealed partial class Ymm4Facade
             "timeline.transaction" => ["durableRollback", "recoveryReadback", "undoBatch"],
             "scene.composition" =>
                 ["currentFrameOnly", "deterministicOrder", "explicitAvailability", "geometryUnits"],
+            "editSurface.admit" =>
+                ["exactTouchedReadback", "normalizePatchForms", "unknownFieldWritable"],
+            "compositionGraph.apply" =>
+                ["paintOrderIndependentOfEffects", "referenceSafeDelete", "unknownKindFailsClosed"],
+            "projectEdit.settings" => ["noOpAdvancesRevision", "settingTaxonomy"],
+            "projectEdit.scene" or "projectEdit.timeline" => ["referencedDelete"],
+            "projectEdit.character" =>
+                ["unknownDependentsFailClosed", "updateExactlyOneSettingClass"],
+            "projectEdit.templateDefinition" => ["definitionEdits"],
+            "editTransaction.apply" =>
+                ["laterTaskStaleAfterCommit", "maxOperations", "unifiedEndpointOnly"],
             "readback.semantic" => [],
             _ => throw new BridgeValidationException(
                 $"Unknown native-extension capability dependency: {feature}"),

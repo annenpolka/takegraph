@@ -97,7 +97,7 @@ impl ImportedYmm4NativeVoiceArtifact {
         artifact_root: &Path,
         character_name: &str,
         display_text: &str,
-        spoken_text: &str,
+        spoken_text: Option<&str>,
     ) -> Result<(), ArtifactError> {
         self.verify(artifact_root)?;
         validate_ymm4_provenance_binding(&self.query, character_name, display_text, spoken_text)
@@ -118,7 +118,7 @@ pub fn import_ymm4_native_voice_artifact(
     artifact_root: &Path,
     character_name: &str,
     display_text: &str,
-    spoken_text: &str,
+    spoken_text: Option<&str>,
 ) -> Result<ImportedYmm4NativeVoiceArtifact, ArtifactError> {
     let bridge_root = fs::canonicalize(authorized_bridge_root)?;
     let audio_source = canonical_staged_file(&bridge_root, Path::new(&staged.audio_path))?;
@@ -260,12 +260,16 @@ fn validate_ymm4_provenance_binding(
     query: &Value,
     character_name: &str,
     display_text: &str,
-    spoken_text: &str,
+    spoken_text: Option<&str>,
 ) -> Result<(), ArtifactError> {
+    let observed_spoken = query.get("spokenText").and_then(Value::as_str);
+    let spoken_mismatch = match spoken_text {
+        Some(approved) => observed_spoken != Some(approved),
+        None => observed_spoken.is_none_or(str::is_empty),
+    };
     if query.get("characterName").and_then(Value::as_str) != Some(character_name)
         || query.get("displayText").and_then(Value::as_str) != Some(display_text)
-        // spokenText is the approved speech input (YMM4 Serif), not engine Hatsuon.
-        || query.get("spokenText").and_then(Value::as_str) != Some(spoken_text)
+        || spoken_mismatch
     {
         return Err(ArtifactError::ArtifactSemanticMismatch(
             "provenance character/display/spoken text does not match the approved mutation".into(),
@@ -533,7 +537,7 @@ mod tests {
             &cas,
             "春日部つむぎ",
             "ここから第二形態です",
-            "ここから第二形態です",
+            Some("ここから第二形態です"),
         )
         .unwrap();
         imported
@@ -541,7 +545,7 @@ mod tests {
                 &cas,
                 "春日部つむぎ",
                 "ここから第二形態です",
-                "ここから第二形態です",
+                Some("ここから第二形態です"),
             )
             .unwrap();
         assert_ne!(imported.audio_path, audio_path);
@@ -551,7 +555,7 @@ mod tests {
                 &cas,
                 "別のキャラクター",
                 "ここから第二形態です",
-                "ここから第二形態です",
+                Some("ここから第二形態です"),
             ),
             Err(ArtifactError::ArtifactSemanticMismatch(_))
         ));

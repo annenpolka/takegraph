@@ -1,18 +1,49 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const workspaceRoot = path.resolve(import.meta.dirname, "..", "..", "..");
-const guardExecutable =
-  process.env.TAKEGRAPH_CORE_GUARD ??
-  path.join(
-    workspaceRoot,
+
+function resolveGuardExecutable(): string {
+  if (process.env.TAKEGRAPH_CORE_GUARD) {
+    return process.env.TAKEGRAPH_CORE_GUARD;
+  }
+  const binary = process.platform === "win32" ? "takegraph.exe" : "takegraph";
+  let current = path.resolve(import.meta.dirname);
+  for (let depth = 0; depth < 8; depth += 1) {
+    const candidate = path.join(current, "target", "debug", binary);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  current = path.resolve(process.cwd());
+  for (let depth = 0; depth < 8; depth += 1) {
+    const candidate = path.join(current, "target", "debug", binary);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return path.join(
+    path.resolve(import.meta.dirname, "..", "..", ".."),
     "target",
     "debug",
-    process.platform === "win32" ? "takegraph.exe" : "takegraph",
+    binary,
   );
+}
+
+const guardExecutable = resolveGuardExecutable();
 
 export type VoiceEngineStatus = "connected" | "unavailable";
 export type TakeReadiness = "ready" | "query-ready";
@@ -132,17 +163,23 @@ async function commitThroughCore(input: {
   digest: string;
   approvedDigest: string;
 }): Promise<number> {
-  const { stdout } = await execFileAsync(guardExecutable, [
-    "patch-commit",
-    "--base",
-    String(input.baseRevision),
-    "--head",
-    String(input.headRevision),
-    "--digest",
-    input.digest,
-    "--approved-digest",
-    input.approvedDigest,
-  ]);
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(guardExecutable, [
+      "patch-commit",
+      "--base",
+      String(input.baseRevision),
+      "--head",
+      String(input.headRevision),
+      "--digest",
+      input.digest,
+      "--approved-digest",
+      input.approvedDigest,
+    ]));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`takegraph guard ${guardExecutable} failed: ${detail}`);
+  }
   const result = JSON.parse(stdout) as { revision?: number };
   if (!Number.isSafeInteger(result.revision)) {
     throw new Error("takegraph-core returned an invalid revision");

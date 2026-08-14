@@ -132,13 +132,16 @@ already-materialized, hash-bound WAV. Legacy physical JSON omitting
 request digest; a distinct value is included in the request digest.
 
 The native voice routes invoke YMM4's `MainModel.AddVoiceItemAsync`, store
-TakeGraph identity in the non-rendered `Remark`, and verify character, text,
-frame, layer, and bounded actual length. The mutation routes support create,
-replacement-update with an internal preserved-state digest, and delete with
-absence read-back. Artifact export produces an exact YMM4 WAV plus normalized
-host-bound voice-state provenance; the JSON is not a portable synthesis query.
-Create/update currently require display text and spoken text to be identical;
-use the portable route when those differ.
+TakeGraph identity in the non-rendered `Remark`, and write `displayText` to
+`VoiceItem.Serif`. `spokenText` is optional: when present it is written to
+`VoiceItem.Hatsuon` and read back exactly; when omitted, YMM4 derives Hatsuon
+and the bridge only requires that a non-empty pronunciation exists. Distinct
+bound display/spoken values require the advertised
+`voiceItem.create/update.separateDisplayAndSpokenText` property. The mutation
+routes support create, replacement-update with an internal preserved-state
+digest, and delete with absence read-back. Artifact export produces an exact
+YMM4 WAV plus normalized host-bound voice-state provenance; the JSON is not a
+portable synthesis query.
 
 `GET /v1/project/snapshot` also returns `nativeExtensions`, a fresh managed-only
 projection used for reconciliation. It contains only TakeGraph-owned identity,

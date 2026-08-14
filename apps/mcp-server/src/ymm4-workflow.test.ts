@@ -37,7 +37,7 @@ else if (args[0] === "voicevox" && args[1] === "materialize") print({ speaker: v
 else if (args[0] === "ymm4" && args[1] === "export-stage") { const manifest = JSON.parse(fs.readFileSync(value("--manifest"), "utf8")); const base = Number(value("--head")); fs.writeFileSync(value("--patch"), JSON.stringify({ patch: { base } })); print({ patchId: "patch-1", digest: "d".repeat(64), baseRevision: base, operationId: "11111111-1111-4111-8111-111111111111", project: { projectId: "project-1" }, plan: { operationCount: manifest.length, createCount: manifest.length, replaceCount: 0, unchangedCount: 0, stateRoot: value("--state-root") }, targetPlanDigest: "sha256:" + "t".repeat(64), targetPlan: { cues: manifest.map(() => ({ strategy: "portable_pair" })) }, patchFile: value("--patch") }); }
 else if (args[0] === "ymm4" && args[1] === "export-commit") { const base = JSON.parse(fs.readFileSync(value("--patch"), "utf8")).patch.base; print({ baseRevision: base, revision: Number(value("--head")) + 1, canonicalReplay: false, operationId: "11111111-1111-4111-8111-111111111111", stateRoot: value("--state-root") }); }
 else if (args[0] === "ymm4" && args[1] === "export-verify") print({ verified: true });
-else if (args[0] === "ymm4" && args[1] === "native-voice-stage") { const manifest = JSON.parse(fs.readFileSync(value("--manifest"), "utf8")); if (manifest.some((item) => item.displayText !== item.spokenText)) { process.stderr.write("native voice text mismatch"); process.exit(3); } const base = Number(value("--head")); fs.writeFileSync(value("--patch"), JSON.stringify({ patch: { base } })); print({ patchId: "native-patch-1", digest: "n".repeat(64), baseRevision: base, operationId: "22222222-2222-4222-8222-222222222222", project: { projectId: "project-1" }, plan: { fingerprint: "f".repeat(64), createCount: manifest.length, durationResolution: "bounded", stateRoot: value("--state-root") }, targetPlanDigest: "sha256:" + "u".repeat(64), targetPlan: { cues: manifest.map(() => ({ strategy: "native_voice" })) }, patchFile: value("--patch") }); }
+else if (args[0] === "ymm4" && args[1] === "native-voice-stage") { const manifest = JSON.parse(fs.readFileSync(value("--manifest"), "utf8")); const base = Number(value("--head")); fs.writeFileSync(value("--patch"), JSON.stringify({ patch: { base } })); print({ patchId: "native-patch-1", digest: "n".repeat(64), baseRevision: base, operationId: "22222222-2222-4222-8222-222222222222", project: { projectId: "project-1" }, plan: { fingerprint: "f".repeat(64), createCount: manifest.length, durationResolution: "bounded", stateRoot: value("--state-root") }, targetPlanDigest: "sha256:" + "u".repeat(64), targetPlan: { cues: manifest.map(() => ({ strategy: "native_voice" })) }, patchFile: value("--patch") }); }
 else if (args[0] === "ymm4" && args[1] === "native-voice-commit") { const base = JSON.parse(fs.readFileSync(value("--patch"), "utf8")).patch.base; print({ baseRevision: base, revision: Number(value("--head")) + 1, canonicalReplay: false, operationId: "22222222-2222-4222-8222-222222222222", stateRoot: value("--state-root") }); }
 else if (args[0] === "ymm4" && args[1] === "native-voice-verify") print({ verified: true, realizationKind: "ymm4_native_voice" });
 else if (args[0] === "ymm4" && args[1] === "timeline-edit-stage") { const manifest = JSON.parse(fs.readFileSync(value("--manifest"), "utf8")); const base = Number(value("--head")); fs.writeFileSync(value("--task"), JSON.stringify({ patch: { base, digest: "1".repeat(64), approved_digest: null, status: "previewable" }, manifest })); print({ taskFile: value("--task"), patchId: "timeline-patch-1", digest: "1".repeat(64), baseRevision: base, operationId: "55555555-5555-4555-8555-555555555555", project: { projectId: "project-1" }, planDigest: "sha256:" + "2".repeat(64), timelineEditPlan: { operationCount: manifest.operations.length, operationKinds: manifest.operations.map((operation) => operation.type) } }); }
@@ -1190,24 +1190,6 @@ test("YMM4 timeline edit rejects unsupported or ambiguous operation sets before 
       }),
     /must cover every operation/,
   );
-  await assert.rejects(
-    () =>
-      workflow.stageTimelineEdit({
-        operations: [
-          {
-            op: "native_voice_create",
-            entityId: "native",
-            displayText: "display",
-            spokenText: "spoken",
-            characterName: "character",
-            frame: 10,
-            layer: 2,
-            maxLength: 120,
-          },
-        ],
-      }),
-    /must be identical/,
-  );
 });
 
 test("YMM4 workflow rejects duplicate native voice entity IDs before staging", async () => {
@@ -1255,22 +1237,7 @@ test("YMM4 workflow rejects duplicate native voice entity IDs before staging", a
   );
 });
 
-test("YMM4 native voice workflow rejects separate display and spoken text", async () => {
-  const workflow = new Ymm4Workflow();
-  await assert.rejects(
-    () =>
-      workflow.stageNativeVoice({
-        entityId: "utt-native-02",
-        displayText: "VOICEVOX",
-        spokenText: "ボイスボックス",
-        characterName: "春日部つむぎ",
-        frame: 0,
-        layer: 0,
-        maxLength: 240,
-      }),
-    /displayText and spokenText must be identical/,
-  );
-});
+
 
 test("YMM4 native voice mutation workflow exposes create update delete and artifact CAS", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "takegraph-ymm4-mutation-"));

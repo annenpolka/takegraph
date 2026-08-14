@@ -55,6 +55,7 @@ var tests = new (string Name, Action Run)[]
     ("metadata detach removes only the selected Remark identity", MetadataDetachRemovesSelectedRemarkIdentity),
     ("unified target-plan cue is sealed", UnifiedTargetPlanCueIsSealed),
     ("timeline-edit historical binding is live-state independent", TimelineEditHistoricalBindingIsLiveStateIndependent),
+    ("timeline-edit native-only payloads are accepted", TimelineEditNativeOnlyPayloadsAreAccepted),
     ("unified portable actions bind current pair state", UnifiedPortableActionsBindCurrentPairState),
     ("portable audio is leased from immutable CAS", PortableAudioIsLeasedFromImmutableCas),
 };
@@ -402,7 +403,7 @@ static void StructuredCapabilityDigestGolden()
         capabilities,
         "0.2.0",
         "4.55.1.1");
-    Assert(actual == "sha256:d5e733421b19ff855abed7bc9a7bd08c13543411ae8245835c24d17d14465a96",
+    Assert(actual == "sha256:8a58fd233893233f43799a1aa0e63b1d1132d4229fa833f622467b382c71e8d5",
         $"structured capability digest differs from Rust: {actual}");
 }
 
@@ -496,8 +497,8 @@ static void UnifiedTargetPlanCueIsSealed()
         duration = new { kind = "bounded", maxFrames = 180 },
         ownership = new
         {
-            strict = new[] { "identity", "text", "characterBinding", "timingIntent" },
-            derived = new[] { "length", "pronunciation", "voiceCache" },
+            strict = new[] { "identity", "displayText", "spokenText", "characterBinding", "timingIntent" },
+            derived = new[] { "length", "voiceCache" },
             preserve = new[] { "unknownNativeFields" },
             global = new[] { "characterDefinitions", "projectSettings" },
         },
@@ -679,6 +680,48 @@ static void TimelineEditHistoricalBindingIsLiveStateIndependent()
             $"sha256:{new string('f', 64)}",
             document.RootElement),
         "historical timeline-edit binding accepted a different plan digest");
+}
+
+static void TimelineEditNativeOnlyPayloadsAreAccepted()
+{
+    var native = new NativeVoiceCueDto(
+        Guid.Parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        "live-native-only",
+        3,
+        "ゆっくり霊夢",
+        "ライブ動作確認",
+        "ライブ動作確認",
+        1000,
+        2,
+        180);
+    var hash = new string('a', 64);
+    var portable = new ManagedUtteranceDto(
+        "utt-01",
+        1,
+        "魔理沙",
+        "caption",
+        @"C:\artifacts\take.wav",
+        hash,
+        10,
+        20,
+        1,
+        2,
+        "spoken");
+
+    Ymm4Facade.ValidateTimelineEditPayloads([], [native], verifyArtifacts: false);
+    Ymm4Facade.ValidateTimelineEditPayloads([portable], [], verifyArtifacts: false);
+    Ymm4Facade.ValidateTimelineEditPayloads([portable], [native], verifyArtifacts: false);
+    Ymm4Facade.ValidateTimelineEditPayloads(
+        [],
+        [native with { DisplayText = "表示", SpokenText = "発話" }],
+        verifyArtifacts: false);
+    Ymm4Facade.ValidateTimelineEditPayloads(
+        [],
+        [native with { SpokenText = null }],
+        verifyArtifacts: false);
+    ExpectBridgeValidation(
+        () => Ymm4Facade.ValidateTimelineEditPayloads([], [], verifyArtifacts: false),
+        "empty timeline-edit payloads were accepted");
 }
 
 static void UnifiedPortableActionsBindCurrentPairState()

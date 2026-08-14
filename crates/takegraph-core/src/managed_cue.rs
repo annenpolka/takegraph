@@ -22,7 +22,9 @@ pub struct ManagedCueIntent {
     pub entity_id: String,
     pub entity_revision: u64,
     pub display_text: String,
-    pub spoken_text: String,
+    /// Approved synthesis input. `None` leaves Hatsuon to the YMM4 driver.
+    #[serde(default)]
+    pub spoken_text: Option<String>,
     pub speaker_role: String,
     pub voice_profile: Option<String>,
     pub caption_style: Option<String>,
@@ -51,7 +53,7 @@ impl ManagedCueIntent {
             entity_id: entity_id.into(),
             entity_revision,
             display_text: display_text.into(),
-            spoken_text: spoken_text.into(),
+            spoken_text: Some(spoken_text.into()),
             speaker_role: speaker_role.into(),
             voice_profile: None,
             caption_style: None,
@@ -81,8 +83,12 @@ impl ManagedCueIntent {
         availability: RealizationAvailability,
     ) -> Result<StrategySelection, TargetPlanError> {
         self.validate()?;
-        let native_text_supported = self.display_text == self.spoken_text
-            || availability.native_separate_display_and_spoken_text;
+        let native_text_supported = match self.spoken_text.as_deref() {
+            None => true,
+            Some(spoken) => {
+                spoken == self.display_text || availability.native_separate_display_and_spoken_text
+            }
+        };
         let native_available = availability.native_voice && native_text_supported;
 
         match self.realization_preference {
@@ -153,7 +159,11 @@ impl ManagedCueIntent {
         if self.display_text.trim().is_empty() {
             return Err(TargetPlanError::EmptyField("displayText"));
         }
-        if self.spoken_text.trim().is_empty() {
+        if self
+            .spoken_text
+            .as_ref()
+            .is_some_and(|spoken| spoken.trim().is_empty())
+        {
             return Err(TargetPlanError::EmptyField("spokenText"));
         }
         if self.speaker_role.trim().is_empty() {
@@ -551,16 +561,38 @@ pub struct OwnershipMask {
 impl OwnershipMask {
     #[must_use]
     pub fn native_voice_create() -> Self {
-        Self {
-            strict: vec![
-                "identity".into(),
-                "text".into(),
-                "characterBinding".into(),
-                "timingIntent".into(),
-            ],
-            derived: vec!["length".into(), "pronunciation".into(), "voiceCache".into()],
-            preserve: vec!["unknownNativeFields".into()],
-            global: vec!["characterDefinitions".into(), "projectSettings".into()],
+        Self::native_voice_create_with_spoken(true)
+    }
+
+    /// Native create ownership. Bound spoken text is strict; omitted spoken
+    /// text leaves pronunciation as a derived YMM field.
+    #[must_use]
+    pub fn native_voice_create_with_spoken(spoken_bound: bool) -> Self {
+        if spoken_bound {
+            Self {
+                strict: vec![
+                    "identity".into(),
+                    "displayText".into(),
+                    "spokenText".into(),
+                    "characterBinding".into(),
+                    "timingIntent".into(),
+                ],
+                derived: vec!["length".into(), "voiceCache".into()],
+                preserve: vec!["unknownNativeFields".into()],
+                global: vec!["characterDefinitions".into(), "projectSettings".into()],
+            }
+        } else {
+            Self {
+                strict: vec![
+                    "identity".into(),
+                    "displayText".into(),
+                    "characterBinding".into(),
+                    "timingIntent".into(),
+                ],
+                derived: vec!["length".into(), "pronunciation".into(), "voiceCache".into()],
+                preserve: vec!["unknownNativeFields".into()],
+                global: vec!["characterDefinitions".into(), "projectSettings".into()],
+            }
         }
     }
 
@@ -769,6 +801,61 @@ mod tests {
                 fallback: Some(FallbackReason::SeparateDisplayAndSpokenText),
             }
         );
+    }
+
+    #[test]
+    fn omitted_spoken_text_admits_native() {
+        let mut intent = cue("第二形態", "unused");
+        intent.spoken_text = None;
+        let selection = intent
+            .select_strategy(RealizationAvailability {
+                native_voice: true,
+                native_separate_display_and_spoken_text: false,
+                portable_audio_caption: true,
+            })
+            .unwrap();
+        assert_eq!(
+            selection,
+            StrategySelection {
+                strategy: RealizationStrategy::Ymm4NativeVoice,
+                fallback: None,
+            }
+        );
+    }
+
+    #[test]
+    fn advertised_separate_text_admits_native() {
+        let selection = cue("第二形態", "だいにけいたい")
+            .select_strategy(RealizationAvailability {
+                native_voice: true,
+                native_separate_display_and_spoken_text: true,
+                portable_audio_caption: true,
+            })
+            .unwrap();
+
+        assert_eq!(
+            selection,
+            StrategySelection {
+                strategy: RealizationStrategy::Ymm4NativeVoice,
+                fallback: None,
+            }
+        );
+    }
+
+    #[test]
+    fn required_native_rejects_separate_text_without_capability() {
+        let mut required = cue("第二形態", "だいにけいたい");
+        required.realization_preference = RealizationPreference::RequireNative;
+        assert!(matches!(
+            required
+                .select_strategy(RealizationAvailability {
+                    native_voice: true,
+                    native_separate_display_and_spoken_text: false,
+                    portable_audio_caption: true,
+                })
+                .unwrap_err(),
+            TargetPlanError::SeparateTextUnsupported
+        ));
     }
 
     #[test]

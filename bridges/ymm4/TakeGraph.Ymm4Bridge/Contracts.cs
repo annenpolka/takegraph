@@ -63,7 +63,8 @@ internal sealed record ManagedItemDto(
     string? AudioPath,
     string? ArtifactHash,
     string? Speaker = null,
-    string? RealizationId = null);
+    string? RealizationId = null,
+    string? SpokenText = null);
 
 /// Fresh managed-only native-extension projection. Preservation witnesses,
 /// opaque effects, and host-local state are intentionally absent.
@@ -281,7 +282,7 @@ internal sealed record NativeVoiceCueDto(
     ulong Revision,
     string CharacterName,
     string DisplayText,
-    string SpokenText,
+    string? SpokenText,
     int Frame,
     int Layer,
     int MaxLength);
@@ -292,7 +293,7 @@ internal sealed record NativeVoiceMutationDto(
     ulong Revision,
     string CharacterName,
     string DisplayText,
-    string SpokenText,
+    string? SpokenText,
     int Frame,
     int Layer,
     int MaxLength,

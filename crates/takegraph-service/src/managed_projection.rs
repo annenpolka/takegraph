@@ -193,6 +193,7 @@ mod tests {
             length: 90,
             text: matches!(kind, ManagedItemKind::Caption | ManagedItemKind::Voice)
                 .then(|| "caption".into()),
+            spoken_text: matches!(kind, ManagedItemKind::Voice).then(|| "caption".into()),
             audio_path: matches!(kind, ManagedItemKind::Audio).then(|| "voice.wav".into()),
             artifact_hash: (!matches!(kind, ManagedItemKind::Voice))
                 .then(|| "sha256:artifact".into()),
