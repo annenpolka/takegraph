@@ -4,6 +4,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   formatAgentError,
+  formatAnnotationsText,
   formatCompositionText,
   formatDescriptorInventoryText,
   formatRenderProfilesText,
@@ -65,6 +66,7 @@ export const INSPECT_VIEWS = [
   "catalog",
   "tasks",
   "task",
+  "annotations",
 ] as const;
 
 /**
@@ -368,10 +370,20 @@ const nativeExtensionStageSchema = z.object({
   maxChangedEntities: z.number().int().positive().optional(),
 });
 
+const sourceEvidenceSchema = z
+  .object({
+    annotationId: z.string().uuid(),
+    captureAudioSha256: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    transcriptDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    interpretationDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  })
+  .strict();
+
 const timelineEditOperationSchema = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("portable_voice_create"),
     ...portableVoiceItemFields,
+    sourceEvidence: sourceEvidenceSchema.optional(),
   }),
   z.object({
     op: z.literal("native_voice_create"),
@@ -382,6 +394,7 @@ const timelineEditOperationSchema = z.discriminatedUnion("op", [
     frame: z.number().int().min(0),
     layer: z.number().int().min(0),
     maxLength: z.number().int().positive(),
+    sourceEvidence: sourceEvidenceSchema.optional(),
   }),
 ]);
 
@@ -459,6 +472,54 @@ const renderStageSchema = z.object({
   overwrite: z.boolean().default(false),
 });
 
+const annotationIntentSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("note") }).strict(),
+  z
+    .object({
+      kind: z.literal("highlight"),
+      reason: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("narration"),
+      topic: z.string().min(1),
+      draftHint: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("cut_candidate"),
+      reason: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("verify"),
+      question: z.string().min(1),
+    })
+    .strict(),
+]);
+
+const annotationDeriveStageSchema = z
+  .object({
+    kind: z.literal("annotation_derive"),
+    captureId: z.string().uuid(),
+    mode: z.enum(["transcribe", "interpret", "correct"]),
+    text: z.string().min(1).optional(),
+    language: z.string().min(1).optional(),
+    intents: z.array(annotationIntentSchema).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.mode === "correct" && !value.text) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "correct mode requires text",
+        path: ["text"],
+      });
+    }
+  });
+
 const checkpointStageSchema = z.object({
   kind: z.literal("checkpoint"),
 });
@@ -491,6 +552,7 @@ const stageInputSchema = z.union([
   nativeExtensionStageSchema,
   projectInitializationStageSchema,
   sceneStageSchema,
+  annotationDeriveStageSchema,
   checkpointStageSchema,
   renderStageSchema,
   reconciliationReportSchema,
@@ -508,6 +570,7 @@ const STAGE_KINDS = [
   "native_extension",
   "project_initialization",
   "scene_inspection",
+  "annotation_derive",
   "checkpoint",
   "render",
   "reconciliation",
@@ -543,6 +606,10 @@ const stageHostInputSchema = z.object({
   maxLength: z.number().int().positive().optional(),
   mutations: z.array(z.record(z.string(), z.unknown())).optional(),
   mode: z.string().min(1).optional(),
+  captureId: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  language: z.string().min(1).optional(),
+  intents: z.array(z.unknown()).optional(),
   path: z.string().min(1).optional(),
   frames: z.array(z.number().int().min(0)).optional(),
   expectedWidth: z.number().int().positive().optional(),
@@ -588,6 +655,46 @@ function asRecord(value: unknown): UnknownRecord | undefined {
     : undefined;
 }
 
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function projectAnnotationInspect(raw: unknown): UnknownRecord {
+  const root = asRecord(raw) ?? {};
+  return {
+    projectId: root.projectId ?? null,
+    sourceFingerprint: root.sourceFingerprint ?? null,
+    annotations: asArray(root.annotations).map((item) => {
+      const row = asRecord(item) ?? {};
+      return {
+        annotationId: row.annotationId ?? null,
+        sessionId: row.sessionId ?? null,
+        startFrame: row.startFrame ?? null,
+        endFrame: row.endFrame ?? null,
+        sceneId: row.sceneId ?? null,
+        projectId: row.projectId ?? null,
+        sourceFingerprint: row.sourceFingerprint ?? null,
+        fps: row.fps ?? null,
+        stability: row.stability ?? null,
+        lifecycle: row.lifecycle ?? null,
+        capturedAtUtc: row.capturedAtUtc ?? null,
+        stale: row.stale ?? null,
+        transcriptSummary: row.transcriptSummary ?? null,
+        audioSha256: row.audioSha256 ?? null,
+        transcriptDigest: row.transcriptDigest ?? null,
+        intents: row.intents ?? [],
+        temporal: row.temporal ?? null,
+        interpretationDigest: row.interpretationDigest ?? null,
+        derivePhase: row.derivePhase ?? null,
+        promotionStatus: row.promotionStatus ?? null,
+        promotionTaskId: row.promotionTaskId ?? null,
+        promotionPlanDigest: row.promotionPlanDigest ?? null,
+        promotionBaseRevision: row.promotionBaseRevision ?? null,
+      };
+    }),
+  };
+}
+
 function jsonValue(value: unknown): JsonValue {
   if (value === undefined) return null;
   const serialized = JSON.stringify(value);
@@ -597,6 +704,7 @@ function jsonValue(value: unknown): JsonValue {
 
 const INTERNAL_DETAIL_KEYS = new Set([
   "childTaskId",
+  "executable",
   "handle",
   "nativeId",
   "operationId",
@@ -608,7 +716,7 @@ const INTERNAL_DETAIL_KEYS = new Set([
 function isInternalDetailKey(key: string): boolean {
   return (
     INTERNAL_DETAIL_KEYS.has(key) ||
-    /(?:directory|file|path|root|token)$/iu.test(key)
+    /(?:directory|executable|file|path|root|token)$/iu.test(key)
   );
 }
 
@@ -1389,6 +1497,10 @@ function actionsFor(kind: TaskKind, phase: string, result?: unknown): TaskAction
     }
     return ["inspect"];
   }
+  if (kind === "annotation_derive") {
+    if (normalized === "staged") return ["inspect", "execute"];
+    return ["inspect"];
+  }
   if (
     [
       "accepted",
@@ -1437,6 +1549,20 @@ function actionsFor(kind: TaskKind, phase: string, result?: unknown): TaskAction
     return ["inspect"];
   }
   return ["inspect", "execute"];
+}
+
+export function rememberStagedTimelineEdit(
+  registry: TaskFacadeRegistry,
+  result: unknown,
+): TaskEnvelope {
+  return rememberCanonicalTask(registry, {
+    kind: "timeline_edit",
+    nativeId: requireNativeId(result, ["handle"]),
+    phase: "staged",
+    result,
+    planDigest: planDigestFrom(result),
+    availableActions: ["inspect", "execute"],
+  });
 }
 
 function rememberCanonicalTask(
@@ -1770,6 +1896,28 @@ async function stageTask(
         false,
       );
     }
+    case "annotation_derive": {
+      const parsed = annotationDeriveStageSchema.parse(input);
+      const result = await options.ymm4.stageAnnotationDerive({
+        captureId: parsed.captureId,
+        mode: parsed.mode,
+        text: parsed.text,
+        language: parsed.language,
+        intents: parsed.intents,
+      });
+      const task = rememberCanonicalTask(options.registry, {
+        kind: "annotation_derive",
+        nativeId: requireNativeId(result, ["handle"]),
+        phase: "staged",
+        result,
+        planDigest: planDigestFrom(result),
+        availableActions: ["inspect", "execute"],
+      });
+      return taskResult(
+        task,
+        `Annotation derive staged; capture is unchanged. mode=${parsed.mode} captureId=${parsed.captureId}`,
+      );
+    }
     case "checkpoint": {
       const result = await options.ymm4.stageCheckpoint();
       const task = rememberCanonicalTask(options.registry, {
@@ -2001,6 +2149,26 @@ async function executeTask(
       }
       phase = phaseFromResult(result, input.intent === "run" ? "initialized" : "observed");
       revisionEffect = projectInitializationRevisionEffect(result);
+      break;
+    }
+    case "annotation_derive": {
+      if (input.intent === "revalidate") {
+        result = await options.ymm4.annotationDeriveStatus(parsed.nativeId);
+        phase = phaseFromResult(result, "observed");
+        break;
+      }
+      if (input.intent !== "run") {
+        throw new Error("annotation_derive supports run or revalidate");
+      }
+      const digest = exactKnownDigest(
+        options.registry,
+        input.taskId,
+        requireInputDigest(input.planDigest, "planDigest"),
+      );
+      result = await options.ymm4.runAnnotationDerive(parsed.nativeId, digest);
+      phase = phaseFromResult(result, "completed");
+      approvedPlanDigest = digest;
+      revisionEffect = "none";
       break;
     }
     case "timeline_edit": {
@@ -2367,7 +2535,7 @@ export function registerFacadeTools(
     {
       title: "Inspect TakeGraph",
       description:
-        "Read one uniform view of the studio session, canonical YMM4 project, task lifecycle, catalogs, or partial scene composition. This never stages or mutates a project.",
+        "Read one uniform view of the studio session, canonical YMM4 project, task lifecycle, catalogs, voice annotations, or partial scene composition. This never stages or mutates a project. view=annotations cannot start recording.",
       inputSchema: {
         view: z.enum(INSPECT_VIEWS).default("overview"),
         taskId: z.string().min(1).optional(),
@@ -2422,6 +2590,22 @@ export function registerFacadeTools(
           return {
             content: [{ type: "text", text }],
             structuredContent: structured,
+          };
+        }
+        if (view === "annotations") {
+          const raw = await options.ymm4.listAnnotations();
+          const annotations = projectAnnotationInspect(raw);
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatAnnotationsText(annotations),
+              },
+            ],
+            structuredContent:
+              asRecord(modelFacingDetails({ view, ...annotations })) ?? {
+                view,
+              },
           };
         }
         if (view === "catalog") {
@@ -2481,6 +2665,11 @@ export function registerFacadeTools(
                 throw new Error(
                   `${taskId} is not cached and its durable revalidation may update workflow metadata. Use takegraph_task_execute with intent=revalidate, then inspect the returned envelope.`,
                 );
+              case "annotation_derive":
+                recovered = await options.ymm4.annotationDeriveStatus(
+                  parsed.nativeId,
+                );
+                break;
               case "timeline_edit":
                 throw new Error(
                   `${taskId} is not cached. Use takegraph_task_execute with intent=revalidate to validate and recover its read-only durable task status, exact planDigest, and availableActions.`,
@@ -2577,7 +2766,7 @@ export function registerFacadeTools(
     {
       title: "Stage TakeGraph task",
       description:
-        "Create an immutable candidate, observation, or digest-bound plan through its owning store. timeline_edit accepts 1-128 ordered portable and native voice creates in one atomic managed-cue plan. Native extensions remain on their separate guarded task kind. Staging never substitutes for approval or execution.",
+        "Create an immutable candidate, observation, or digest-bound plan through its owning store. timeline_edit accepts 1-128 ordered portable and native voice creates in one atomic managed-cue plan. annotation_derive transcribes or interprets an existing captureId without host paths. Native extensions remain on their separate guarded task kind. Staging never substitutes for approval or execution.",
       inputSchema: stageHostInputSchema,
       outputSchema: taskEnvelopeOutputShape,
       annotations: { destructiveHint: false },

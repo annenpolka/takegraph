@@ -2,8 +2,15 @@
 //
 // This module specifies how a captured human voice annotation becomes
 // immutable evidence, how derived transcripts and interpretations bind to
-// that evidence, and which guards promote an interpretation into the
-// canonical revision through the existing patch pipeline.
+// that evidence, which guards promote an interpretation into the
+// canonical revision through the existing patch pipeline, and how a
+// decoration projection may appear on the YMM4 timeline without becoming
+// an editorial commit.
+//
+// importCapture never writes YMM4. placeDecoration may follow it. A
+// decoration must not move canonicalHead or editorialFingerprint.
+// Editorial identity excludes takegraph/annotation/v1 items; that
+// exclusion is an implementation residual of the fingerprint function.
 //
 // It does not specify microphones, audio encoders, ASR engines, LLMs, UI,
 // MCP hosts, or operating-system behavior.
@@ -18,6 +25,10 @@ module annotationPromotionProtocol {
     | Applied
     | Promoted
     | Stale
+
+  type DecorationStatus =
+    | Absent
+    | Present
 
   type Capture = {
     present: bool,
@@ -53,6 +64,10 @@ module annotationPromotionProtocol {
   var promotion: Promotion
   var sourceStale: bool
   var committedRevision: int
+  var decoration: DecorationStatus
+  var editorialFingerprint: int
+  var captureProject: int
+  var activeProject: int
   var lastEvent: str
 
   val missing = -1
@@ -92,6 +107,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = false,
     committedRevision' = missing,
+    decoration' = Absent,
+    editorialFingerprint' = 0,
+    captureProject' = missing,
+    activeProject' = 1,
     lastEvent' = "init",
   }
 
@@ -107,6 +126,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = 1,
+    activeProject' = activeProject,
     lastEvent' = "capture-imported",
   }
 
@@ -121,6 +144,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "capture-replayed",
   }
 
@@ -136,6 +163,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "capture-conflict-refused",
   }
 
@@ -152,6 +183,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "transcription-failed",
   }
 
@@ -171,6 +206,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "transcript-attached",
   }
 
@@ -188,6 +227,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "transcript-revised",
   }
 
@@ -205,6 +248,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "interpretation-attached",
   }
 
@@ -218,6 +265,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "interpretation-revised",
   }
 
@@ -233,6 +284,10 @@ module annotationPromotionProtocol {
     promotion' = emptyPromotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "capture-dismissed",
   }
 
@@ -248,6 +303,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "capture-reopened",
   }
 
@@ -266,6 +325,10 @@ module annotationPromotionProtocol {
       promotion,
     sourceStale' = true,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "source-marked-stale",
   }
 
@@ -288,6 +351,10 @@ module annotationPromotionProtocol {
     },
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "promotion-staged",
   }
 
@@ -305,6 +372,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "stage-refused-stale-source",
   }
 
@@ -320,6 +391,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "stage-refused-dismissed",
   }
 
@@ -336,6 +411,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint + 1,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "concurrent-verified-commit",
   }
 
@@ -357,6 +436,10 @@ module annotationPromotionProtocol {
       .with("executions", promotion.executions + 1),
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "promotion-applied",
   }
 
@@ -371,6 +454,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "execute-refused-stale-base",
   }
 
@@ -384,7 +471,122 @@ module annotationPromotionProtocol {
     promotion' = promotion.with("status", Promoted),
     sourceStale' = sourceStale,
     committedRevision' = canonicalHead + 1,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint + 1,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = "promotion-verified",
+  }
+
+  // A decoration is a YMM4-visible projection of an active capture. It
+  // is not an editorial commit: head and editorial fingerprint stay put.
+  action placeDecoration = all {
+    capture.present,
+    capture.status == Active,
+    decoration == Absent,
+    captureProject == activeProject,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Present,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
+    lastEvent' = "decoration-placed",
+  }
+
+  action replayDecoration = all {
+    decoration == Present,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Present,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
+    lastEvent' = "decoration-replayed",
+  }
+
+  action refusePlaceDismissed = all {
+    capture.status == Dismissed,
+    decoration == Absent,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
+    lastEvent' = "decoration-refused-dismissed",
+  }
+
+  action switchActiveProject = all {
+    capture.present,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject + 1,
+    lastEvent' = "active-project-switched",
+  }
+
+  action refusePlaceWrongProject = all {
+    capture.present,
+    capture.status == Active,
+    decoration == Absent,
+    captureProject != activeProject,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
+    lastEvent' = "decoration-refused-wrong-project",
+  }
+
+  action removeDecoration = all {
+    decoration == Present,
+    canonicalHead' = canonicalHead,
+    verifiedCommits' = verifiedCommits,
+    capture' = capture,
+    transcript' = transcript,
+    interpretation' = interpretation,
+    promotion' = promotion,
+    sourceStale' = sourceStale,
+    committedRevision' = committedRevision,
+    decoration' = Absent,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
+    lastEvent' = "decoration-removed",
   }
 
   action stutter = all {
@@ -396,6 +598,10 @@ module annotationPromotionProtocol {
     promotion' = promotion,
     sourceStale' = sourceStale,
     committedRevision' = committedRevision,
+    decoration' = decoration,
+    editorialFingerprint' = editorialFingerprint,
+    captureProject' = captureProject,
+    activeProject' = activeProject,
     lastEvent' = lastEvent,
   }
 
@@ -418,6 +624,12 @@ module annotationPromotionProtocol {
     executePromotion,
     refuseStaleBaseExecute,
     confirmVerifiedReadback,
+    placeDecoration,
+    replayDecoration,
+    refusePlaceDismissed,
+    switchActiveProject,
+    refusePlaceWrongProject,
+    removeDecoration,
     stutter,
   }
 
@@ -470,6 +682,19 @@ module annotationPromotionProtocol {
         committedRevision <= canonicalHead,
       }
 
+  // Decorations are not verified commits, so they cannot change the
+  // editorial identity used by capture classification and staged plans.
+  val editorialFingerprintTracksVerifiedCommits =
+    editorialFingerprint == verifiedCommits
+
+  // A dismissed capture has no decoration projection.
+  val dismissedCapturesHaveNoDecoration =
+    capture.status != Dismissed or decoration == Absent
+
+  // Decorations exist only while the live project is the captured one.
+  val decorationsStayOnCapturedProject =
+    decoration != Present or captureProject == activeProject
+
   val safety =
     captureEvidenceIsImmutable
       and transcriptBindsAudioEvidence
@@ -481,6 +706,9 @@ module annotationPromotionProtocol {
       and dismissedCapturesNeverPromote
       and promotionExecutesAtMostOnce
       and promotedRevisionFollowsVerifiedBase
+      and editorialFingerprintTracksVerifiedCommits
+      and dismissedCapturesHaveNoDecoration
+      and decorationsStayOnCapturedProject
 
   run captureToPromotionHappyPathTest = init
     .then(importCapture)
@@ -505,10 +733,55 @@ module annotationPromotionProtocol {
     .then(reviseTranscript)
     .then(attachInterpretation)
     .then(reviseInterpretation)
+    .then(placeDecoration)
     .expect(all {
       safety,
       canonicalHead == 0,
+      editorialFingerprint == 0,
+      decoration == Present,
       interpretation.transcriptDigest == transcript.digest,
+    })
+
+  run decorationDoesNotInvalidateStagedPromotionTest = init
+    .then(importCapture)
+    .then(attachTranscript)
+    .then(attachInterpretation)
+    .then(stagePromotion)
+    .then(placeDecoration)
+    .then(replayDecoration)
+    .then(executePromotion)
+    .then(confirmVerifiedReadback)
+    .expect(all {
+      safety,
+      decoration == Present,
+      promotion.status == Promoted,
+      canonicalHead == 1,
+      editorialFingerprint == 1,
+    })
+
+  run refuseDecorationOnWrongProjectTest = init
+    .then(importCapture)
+    .then(switchActiveProject)
+    .then(refusePlaceWrongProject)
+    .expect(all {
+      safety,
+      decoration == Absent,
+      captureProject != activeProject,
+      canonicalHead == 0,
+      editorialFingerprint == 0,
+    })
+
+  run dismissRemovesDecorationTest = init
+    .then(importCapture)
+    .then(placeDecoration)
+    .then(dismiss)
+    .then(refusePlaceDismissed)
+    .expect(all {
+      safety,
+      decoration == Absent,
+      capture.status == Dismissed,
+      canonicalHead == 0,
+      editorialFingerprint == 0,
     })
 
   run transcriptRevisionDropsPromotionTest = init

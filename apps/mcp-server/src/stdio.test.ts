@@ -25,6 +25,7 @@ test("built stdio server serves the production MCP App bundle", async (t) => {
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
     [
+      "studio_annotations",
       "studio_patch_commit",
       "studio_project_describe",
       "studio_ui_get_state",

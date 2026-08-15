@@ -10,6 +10,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   formatAgentError,
+  formatAnnotationsText,
   formatDescriptorInventoryText,
   formatFollowUpReport,
   formatRenderProfilesText,
@@ -23,7 +24,11 @@ import {
   STORE_CANONICAL,
   TAKEGRAPH_AGENT_GUIDE,
 } from "./agent-text.js";
-import { registerFacadeTools, TaskFacadeRegistry } from "./facade.js";
+import {
+  registerFacadeTools,
+  rememberStagedTimelineEdit,
+  TaskFacadeRegistry,
+} from "./facade.js";
 import { ProjectSession, type ProjectState } from "./project-session.js";
 import { Ymm4Workflow } from "./ymm4-workflow.js";
 
@@ -1956,6 +1961,97 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     async () => {
       const state = session.snapshot();
       return stateResult(state, formatStudioSessionText(state, "Studio session refreshed."));
+    },
+  );
+
+  registerAppTool(
+    server,
+    "studio_annotations",
+    {
+      title: "Review voice annotations",
+      description:
+        "List, correct, dismiss, interpret, or preview-promote captured voice notes. App-only; recording stays local.",
+      inputSchema: {
+        action: z.enum(["list", "correct", "dismiss", "interpret", "promote"]),
+        annotationId: z.string().min(1).optional(),
+        text: z.string().min(1).optional(),
+        reason: z.string().optional(),
+        characterName: z.string().min(1).optional(),
+        layer: z.number().int().min(0).optional(),
+        maxLength: z.number().int().positive().optional(),
+      },
+      annotations: { destructiveHint: false },
+      _meta: toolMeta,
+    },
+    async (input) => {
+      try {
+        if (input.action === "list") {
+          const listed = await ymm4.listAnnotations();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: formatAnnotationsText(listed),
+              },
+            ],
+            structuredContent: { annotations: listed },
+          };
+        }
+        if (!input.annotationId) {
+          throw new Error("annotationId is required");
+        }
+        if (input.action === "correct") {
+          if (!input.text) throw new Error("text is required to correct a transcript");
+          const result = await ymm4.correctAnnotationTranscript(
+            input.annotationId,
+            input.text,
+          );
+          return {
+            content: [{ type: "text" as const, text: "Transcript revision attached." }],
+            structuredContent: { result },
+          };
+        }
+        if (input.action === "dismiss") {
+          const result = await ymm4.dismissAnnotation(input.annotationId, input.reason);
+          return {
+            content: [{ type: "text" as const, text: "Capture dismissed." }],
+            structuredContent: { result },
+          };
+        }
+        if (input.action === "interpret") {
+          const result = await ymm4.interpretAnnotation(input.annotationId);
+          return {
+            content: [{ type: "text" as const, text: "Interpretation attached." }],
+            structuredContent: { result },
+          };
+        }
+        if (!input.characterName) {
+          throw new Error("characterName is required to promote a narration");
+        }
+        const result = (await ymm4.promoteAnnotation({
+          annotationId: input.annotationId,
+          characterName: input.characterName,
+          layer: input.layer ?? 2,
+          maxLength: input.maxLength,
+        })) as { staged?: unknown };
+        const staged = result.staged;
+        const envelope = staged
+          ? rememberStagedTimelineEdit(facadeRegistry, staged)
+          : undefined;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: envelope
+                ? `Narration staged as timeline_edit ${envelope.taskId}. Execute with the exact planDigest; YMM4 is unchanged.`
+                : "Narration promotion operations are ready for timeline_edit with sourceEvidence.",
+            },
+          ],
+          structuredContent: { result, task: envelope ?? null },
+        };
+      } catch (error) {
+        return errorResult(error);
+      }
     },
   );
 

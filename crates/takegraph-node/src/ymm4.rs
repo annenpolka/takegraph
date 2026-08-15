@@ -2086,6 +2086,7 @@ mod tests {
                 }),
             }],
             warnings: vec![],
+            source_evidence: vec![],
         }
     }
 

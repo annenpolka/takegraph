@@ -1,18 +1,25 @@
 //! Local media-node adapters for `TakeGraph`.
 
 pub mod artifacts;
+pub mod interpretation;
 pub mod native_extension;
 pub mod project_operations;
 pub mod reconciliation;
 pub mod scene_composition;
 pub mod scene_inspection;
+pub mod transcription;
 pub mod voicevox;
+pub mod whisper_cpp;
 pub mod ymm4;
 pub mod ymm4_capabilities;
 
 pub use artifacts::{
     ArtifactError, ImportedYmm4NativeVoiceArtifact, MaterializedVoiceArtifact, WavMetadata,
     import_ymm4_native_voice_artifact, parse_wav,
+};
+pub use interpretation::{
+    HEURISTIC_MODEL_ID, HeuristicInterpreter, HumanInterpretation, InterpretationDraft,
+    InterpretationError, InterpretationInput, InterpretationProvider, seal_interpretation,
 };
 pub use native_extension::{
     NativeExtensionNodeError, Ymm4DescriptorCatalog, Ymm4ExistingNativeExtension,
@@ -52,8 +59,15 @@ pub use scene_inspection::{
     Ymm4SceneCaptureReceipt, Ymm4SceneCaptureRequest, Ymm4SceneCaptureRequestInput,
     Ymm4SceneCaptureStatus, import_png_capture, verify_imported_capture,
 };
+pub use transcription::{
+    ScriptedTranscription, TranscriptResult, TranscriptionError, TranscriptionProvider,
+    seal_transcript,
+};
 pub use voicevox::{
     Speaker, SpeakerStyle, VoiceProvider, VoicevoxCapabilities, VoicevoxClient, VoicevoxError,
+};
+pub use whisper_cpp::{
+    DEFAULT_WHISPER_DECODER_ARGS, WhisperCppProvider, merge_whisper_decoder_args, trim_pcm_for_asr,
 };
 pub use ymm4::{
     ManagedItemKind, ManagedUtterance, YMM4_BRIDGE_PROTOCOL_VERSION, Ymm4ApplyRequest,

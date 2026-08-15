@@ -6,13 +6,18 @@
 
 use takegraph_core::{Patch, PatchError, PatchId, RevisionId};
 
+pub mod annotation_derive;
 pub mod annotation_store;
 mod external_mutation;
+pub mod interpretation;
 mod managed_projection;
 pub mod native_extension_plan;
 pub mod project_operations;
 pub mod project_store;
+pub mod promotion;
 pub mod scene_inspection;
+pub mod transcription_config;
+pub mod transcription_jobs;
 pub mod ymm4_edit_contracts;
 pub mod ymm4_export;
 pub mod ymm4_native_extension;
@@ -22,9 +27,14 @@ pub mod ymm4_realization;
 pub mod ymm4_target_plan;
 pub mod ymm4_timeline_edit;
 
+pub use annotation_derive::{
+    AnnotationDeriveError, AnnotationDeriveMode, AnnotationDerivePhase, AnnotationDerivePlan,
+    AnnotationDeriveReport, AnnotationDeriveStore, run_annotation_derive,
+};
 pub use external_mutation::{
     DurableExternalMutationOutcome, UnsavedProjectError, require_existing_project_path,
 };
+pub use interpretation::{InterpretCaptureError, attach_human_interpretation, interpret_capture};
 pub use native_extension_plan::{
     ExistingNativeExtension, ExistingNativeExtensionKind, ExistingUpdateMode,
     NativeExtensionCapabilities, NativeExtensionFeature, NativeExtensionObservation,
@@ -47,11 +57,24 @@ pub use project_store::{
     ProjectInitializationReservation, ProjectInitializationReservationOutcome,
     ProjectInitializationReservationStatus, ProjectStoreError, TargetLink, VerifiedTargetBinding,
 };
+pub use promotion::{
+    PromotionError, StagedNarrationPromotion, assert_promotion_target,
+    commit_promotions_from_plan, narration_promotion_operations, record_committed_promotion,
+    record_staged_promotion, stage_narration_promotion,
+};
 pub use scene_inspection::{
     ChangedCueFrameRange, SceneCaptureEvidence, SceneCaptureProfile, SceneCaptureSamplePlan,
     SceneHumanReview, SceneInspectionError, SceneInspectionPlan, SceneInspectionReceipt,
     SceneInspectionSource, SceneInspectionStatus, SceneInspectionTask, SceneReviewDecision,
     sample_changed_cue_frames,
+};
+pub use transcription_config::{
+    TranscriptionConfigError, TranscriptionHostConfig, resolve_transcription_host,
+    whisper_host_configured,
+};
+pub use transcription_jobs::{
+    TranscriptionJob, TranscriptionJobError, TranscriptionJobStatus, TranscriptionJobStore,
+    attach_human_transcript, transcribe_capture,
 };
 pub use ymm4_edit_contracts::{
     COMPOSITION_GRAPH_FEATURE, EDIT_SURFACE_FEATURE, EDIT_TRANSACTION_FEATURE,

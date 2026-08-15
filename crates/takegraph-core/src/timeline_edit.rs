@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::{
     CanonicalError, ChangeBudget, NativeExtensionIntent, PlanWarning, PlannedCue,
-    PlannedNativeExtension, RevisionId, ScopeFingerprints, TargetIdentity, TargetPlanError,
-    canonical_sha256, managed_cue::validate_planned_cue,
+    PlannedNativeExtension, RevisionId, ScopeFingerprints, SourceEvidenceRef, TargetIdentity,
+    TargetPlanError, canonical_sha256, managed_cue::validate_planned_cue,
     native_extension::validate_planned_native_extension,
 };
 
@@ -87,6 +87,9 @@ pub struct TimelineEditPlan {
     pub change_budget: ChangeBudget,
     pub operations: Vec<TimelineEditOperation>,
     pub warnings: Vec<PlanWarning>,
+    /// Optional annotation provenance sealed into the plan digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_evidence: Vec<SourceEvidenceRef>,
 }
 
 impl TimelineEditPlan {
@@ -168,6 +171,11 @@ impl TimelineEditPlan {
                 return Err(TimelineEditError::ConflictingWriteIdentity(identity));
             }
         }
+        for evidence in &self.source_evidence {
+            evidence
+                .validate()
+                .map_err(|error| TimelineEditError::InvalidSourceEvidence(error.to_string()))?;
+        }
         Ok(())
     }
 }
@@ -204,6 +212,8 @@ pub enum TimelineEditError {
     EmptyRealization,
     #[error("multiple operations write the same identity: {0}")]
     ConflictingWriteIdentity(String),
+    #[error("invalid source evidence: {0}")]
+    InvalidSourceEvidence(String),
     #[error(transparent)]
     TargetPlan(#[from] TargetPlanError),
     #[error(transparent)]
@@ -288,7 +298,25 @@ mod tests {
             change_budget: ChangeBudget::create_only(operations.len()),
             operations,
             warnings: vec![],
+            source_evidence: vec![],
         }
+    }
+
+    #[test]
+    fn digest_binds_source_evidence() {
+        use crate::{AnnotationId, SourceEvidenceRef};
+        let operations = vec![TimelineEditOperation::ManagedCue {
+            cue: Box::new(cue("a", 1)),
+        }];
+        let without = plan(operations.clone()).canonical_digest().unwrap();
+        let mut with_evidence = plan(operations);
+        with_evidence.source_evidence = vec![SourceEvidenceRef {
+            annotation_id: AnnotationId::new(),
+            capture_audio_sha256: digest('1'),
+            transcript_digest: digest('2'),
+            interpretation_digest: digest('3'),
+        }];
+        assert_ne!(without, with_evidence.canonical_digest().unwrap());
     }
 
     #[test]

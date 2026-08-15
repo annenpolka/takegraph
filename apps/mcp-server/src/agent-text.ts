@@ -11,7 +11,7 @@ export const TAKEGRAPH_AGENT_GUIDE = [
   `- ${STORE_CANONICAL}: YMM4 + project-store. canonicalRevision is not the studio session head.`,
   "Always name the store when inspecting or staging; never carry an ID or revision from one store into the other.",
   "Five model-facing tools:",
-  "- takegraph_inspect: read project, studio, composition, capabilities, task state, evidence, artifacts, and drift without changing state.",
+  "- takegraph_inspect: read project, studio, composition, capabilities, task state, evidence, artifacts, voice annotations, and drift without changing state. view=annotations is read-only and cannot start recording. The annotations view reports audioSha256, transcriptDigest, interpretationDigest, and derivePhase for promotion. It never reports audio paths, device IDs, capture tokens, or ASR executable/model paths.",
   "- takegraph_task_stage: stage project initialization, an edit, inspection, checkpoint, render, or reconcile plan. Staging does not approve or execute it.",
   "- takegraph_task_approve: when availableActions includes approve, approve the exact planDigest visibly reported for a taskId. Approval does not execute the task.",
   "- takegraph_task_execute: run, review, revalidate, cancel, or collect artifacts. Atomic commit workflows take the exact planDigest here instead of exposing a separate approve phase.",
@@ -21,7 +21,8 @@ export const TAKEGRAPH_AGENT_GUIDE = [
   "- planDigest binds approval to the exact staged plan. Re-inspect the task and approve again if that digest changes.",
   "- when present, evidenceDigest binds accept/reject to the exact evidence set; it is not a plan approval token. A null value must never be replaced with an invented digest.",
   "Workflow: takegraph_inspect -> takegraph_task_stage -> follow availableActions. Use approve only when exposed; otherwise execute with the exact planDigest when requested.",
-  "Batch edits: prefer kind=timeline_edit with operations in canonical order. It accepts 1-128 portable_voice_create and native_voice_create operations as one managed-cue task, one exact planDigest, and one canonical commit. Preparation may run concurrently, but apply order remains the input order.",
+  "Batch edits: prefer kind=timeline_edit with operations in canonical order. It accepts 1-128 portable_voice_create and native_voice_create operations as one managed-cue task, one exact planDigest, and one canonical commit. Preparation may run concurrently, but apply order remains the input order. Optional sourceEvidence on those operations seals annotation provenance into the same planDigest. CutCandidate stays evidence-only.",
+  "Annotation derivation uses kind=annotation_derive with mode=transcribe, interpret, or correct. Stage the captureId only; never send whisper executable or model paths. Recording remains local-only. Execute with the exact planDigest; the canonical head does not advance.",
   "After a timeline_edit restart or uncertain execution, use takegraph_task_execute with intent=revalidate on the same taskId. This payload-validates read-only durable status; retry only when returned availableActions includes execute.",
   "Native voice update/delete remain on kind=native_voice_mutation until the aggregate receipt represents them.",
   "Native extensions are not part of timeline_edit yet; keep them on kind=native_extension so the workflow never implies cross-route atomicity it cannot prove.",
@@ -383,6 +384,41 @@ export function formatTaskListText(
     );
   }
   lines.push(line("next", "takegraph_inspect with view=task and the opaque taskId"));
+  return lines.join("\n");
+}
+
+export function formatAnnotationsText(input: unknown): string {
+  const root = asRecord(input);
+  const annotations = asArray(root.annotations);
+  const lines = [
+    "Voice annotation inventory.",
+    line("store", STORE_CANONICAL),
+    line("projectId", str(root.projectId)),
+    line("sourceFingerprint", str(root.sourceFingerprint)),
+    line("count", annotations.length),
+  ];
+  if (annotations.length === 0) {
+    lines.push("- (none)");
+  }
+  for (const item of annotations) {
+    const record = asRecord(item);
+    const intents = asArray(record.intents)
+      .map((intent) => str(asRecord(intent).kind) ?? "intent")
+      .join(",");
+    const temporal = asRecord(record.temporal);
+    const temporalText = record.temporal
+      ? `${str(temporal.relation) ?? "?"}@${num(temporal.referenceFrame) ?? "?"}:${num(temporal.startOffsetFrames) ?? 0}`
+      : "none";
+    lines.push(
+      `- ${str(record.annotationId) ?? "(unknown)"} frames=${num(record.startFrame) ?? "?"}-${num(record.endFrame) ?? "?"} stability=${str(record.stability) ?? "?"} lifecycle=${str(record.lifecycle) ?? "?"} stale=${record.stale === true ? "true" : record.stale === false ? "false" : "unknown"} promotion=${str(record.promotionStatus) ?? "none"} promotionTaskId=${str(record.promotionTaskId) ?? "(none)"} promotionPlanDigest=${str(record.promotionPlanDigest) ?? "(none)"} derivePhase=${str(record.derivePhase) ?? "none"} audioSha256=${str(record.audioSha256) ?? "(none)"} transcriptDigest=${str(record.transcriptDigest) ?? "(none)"} interpretationDigest=${str(record.interpretationDigest) ?? "(none)"} intents=${intents || "none"} temporal=${temporalText} summary=${str(record.transcriptSummary) ?? "(none)"}`,
+    );
+  }
+  lines.push(
+    line(
+      "next",
+      "recording is local-only. Transcribe or interpret an existing capture with kind=annotation_derive. Promote narration as ordinary timeline_edit (studio promote or kind=timeline_edit with sourceEvidence). If promotionStatus is staged, execute that planDigest; do not restage the same capture. After execute, inspect shows committed",
+    ),
+  );
   return lines.join("\n");
 }
 

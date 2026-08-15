@@ -283,6 +283,55 @@ impl AnnotationTranscript {
     }
 }
 
+/// Relative placement of an interpretation against the capture start frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporalReference {
+    pub reference_frame: i32,
+    pub start_offset_frames: i32,
+    pub end_offset_frames: Option<i32>,
+    pub relation: TemporalRelation,
+}
+
+/// How a spoken note sits relative to the captured frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalRelation {
+    Before,
+    At,
+    After,
+    Range,
+}
+
+impl TemporalReference {
+    /// Validates frame polarity and range ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnnotationError::InvalidInterpretation`] when the reference
+    /// frame is negative or a range is inverted / missing its end.
+    pub fn validate(&self) -> Result<(), AnnotationError> {
+        if self.reference_frame < 0 {
+            return Err(AnnotationError::InvalidInterpretation(
+                "temporal referenceFrame must be zero or greater".into(),
+            ));
+        }
+        if self.relation == TemporalRelation::Range && self.end_offset_frames.is_none() {
+            return Err(AnnotationError::InvalidInterpretation(
+                "range temporal reference requires endOffsetFrames".into(),
+            ));
+        }
+        if let Some(end) = self.end_offset_frames {
+            if end < self.start_offset_frames {
+                return Err(AnnotationError::InvalidInterpretation(
+                    "endOffsetFrames must be greater than or equal to startOffsetFrames".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One structured intent candidate derived from an exact transcript digest.
 /// This is an AI candidate, never capture evidence and never an edit patch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +341,7 @@ pub struct AnnotationInterpretation {
     pub capture_id: AnnotationId,
     /// Exact transcript digest this interpretation was derived from.
     pub transcript_digest: String,
+    pub temporal: TemporalReference,
     pub intents: Vec<AnnotationIntent>,
     pub model_id: String,
     pub model_digest: String,
@@ -321,6 +371,7 @@ impl AnnotationInterpretation {
                 "transcriptDigest must be a sha256:<hex> digest".into(),
             ));
         }
+        self.temporal.validate()?;
         if self.intents.is_empty() {
             return Err(AnnotationError::InvalidInterpretation(
                 "at least one intent is required".into(),
@@ -408,6 +459,38 @@ pub struct SourceEvidenceRef {
     pub interpretation_digest: String,
 }
 
+impl SourceEvidenceRef {
+    /// Validates identifiers and digest shapes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnnotationError::InvalidSourceEvidence`] for a nil capture
+    /// or a malformed digest.
+    pub fn validate(&self) -> Result<(), AnnotationError> {
+        if self.annotation_id.0.is_nil() {
+            return Err(AnnotationError::InvalidSourceEvidence(
+                "annotationId must not be nil".into(),
+            ));
+        }
+        if !is_sha256_digest(&self.capture_audio_sha256) {
+            return Err(AnnotationError::InvalidSourceEvidence(
+                "captureAudioSha256 must be a sha256:<hex> digest".into(),
+            ));
+        }
+        if !is_sha256_digest(&self.transcript_digest) {
+            return Err(AnnotationError::InvalidSourceEvidence(
+                "transcriptDigest must be a sha256:<hex> digest".into(),
+            ));
+        }
+        if !is_sha256_digest(&self.interpretation_digest) {
+            return Err(AnnotationError::InvalidSourceEvidence(
+                "interpretationDigest must be a sha256:<hex> digest".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn require_non_empty(value: &str, field: &str) -> Result<(), AnnotationError> {
     if value.trim().is_empty() {
         return Err(AnnotationError::InvalidAnchor {
@@ -435,6 +518,8 @@ pub enum AnnotationError {
     InvalidTranscript(String),
     #[error("invalid interpretation: {0}")]
     InvalidInterpretation(String),
+    #[error("invalid source evidence: {0}")]
+    InvalidSourceEvidence(String),
 }
 
 #[cfg(test)]
@@ -563,11 +648,28 @@ mod tests {
             id: Uuid::new_v4(),
             capture_id: AnnotationId::new(),
             transcript_digest: format!("sha256:{}", "c".repeat(64)),
+            temporal: TemporalReference {
+                reference_frame: 2531,
+                start_offset_frames: 0,
+                end_offset_frames: None,
+                relation: TemporalRelation::At,
+            },
             intents: Vec::new(),
             model_id: "test-model".into(),
             model_digest: format!("sha256:{}", "d".repeat(64)),
             interpretation_digest: format!("sha256:{}", "e".repeat(64)),
         };
         assert!(instance.validate().is_err());
+    }
+
+    #[test]
+    fn range_temporal_requires_ordered_end() {
+        let temporal = TemporalReference {
+            reference_frame: 10,
+            start_offset_frames: 0,
+            end_offset_frames: Some(-4),
+            relation: TemporalRelation::Range,
+        };
+        assert!(temporal.validate().is_err());
     }
 }

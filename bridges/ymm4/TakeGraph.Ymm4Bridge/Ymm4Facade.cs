@@ -84,39 +84,42 @@ internal sealed partial class Ymm4Facade
         await applyGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            return await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                var main = RequireMainViewModel();
-                var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
-                    ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
-                var rawItems = ReadItems(timelineViewModel);
-                var projectPath = GetString(main, "ProjectFilePath", "ProjectPath");
-                var projectId = Hash($"project|{projectPath}");
-                var sceneId = GetString(timelineViewModel, "ID", "Id", "SceneId");
-                if (string.IsNullOrWhiteSpace(sceneId))
-                {
-                    throw new BridgeUnavailableException(
-                        "YMM4 active scene identity is unavailable for source-bound composition");
-                }
-                var fps = FindExactFps(main, timelineViewModel)
-                    ?? throw new BridgeUnavailableException("YMM4 scene FPS is unavailable");
-                var preview = RequirePreviewViewModel();
-                var frame = ReadExactPreviewFrame(preview, fps)
-                    ?? throw new BridgeUnavailableException("YMM4 current preview frame is unavailable");
-                var fingerprint = Fingerprint(rawItems, projectPath, sceneId, fps);
-                return BuildSceneCompositionSnapshot(
-                    projectId,
-                    sceneId,
-                    fingerprint,
-                    fps,
-                    frame,
-                    rawItems);
-            });
+            return await Application.Current.Dispatcher.InvokeAsync(ObserveCurrentSceneComposition);
         }
         finally
         {
             applyGate.Release();
         }
+    }
+
+    private SceneCompositionSnapshotDto ObserveCurrentSceneComposition()
+    {
+        var main = RequireMainViewModel();
+        var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
+            ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
+        var rawItems = ReadItems(timelineViewModel);
+        var projectPath = GetString(main, "ProjectFilePath", "ProjectPath");
+        var projectId = Hash($"project|{projectPath}");
+        var sceneId = GetString(timelineViewModel, "ID", "Id", "SceneId");
+        if (string.IsNullOrWhiteSpace(sceneId))
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 active scene identity is unavailable for source-bound composition");
+        }
+        var fps = FindExactFps(main, timelineViewModel)
+            ?? throw new BridgeUnavailableException("YMM4 scene FPS is unavailable");
+        var preview = RequirePreviewViewModel();
+        var frame = ReadExactPreviewFrame(preview, fps)
+            ?? ReadExactPreviewFrame(timelineViewModel, fps)
+            ?? throw new BridgeUnavailableException("YMM4 current preview frame is unavailable");
+        var fingerprint = Fingerprint(rawItems, projectPath, sceneId, fps);
+        return BuildSceneCompositionSnapshot(
+            projectId,
+            sceneId,
+            fingerprint,
+            fps,
+            frame,
+            rawItems);
     }
 
     internal static SceneCompositionSnapshotDto BuildSceneCompositionSnapshot(
@@ -6322,7 +6325,10 @@ internal sealed partial class Ymm4Facade
             fingerprint,
             managed,
             nativeExtensions,
-            rawItems.Count(item => !managedObjects.Contains(item.Item)));
+            rawItems.Count(item =>
+                !managedObjects.Contains(item.Item)
+                && !AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
+                && !item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal)));
     }
 
     private static string CurrentProjectId()
@@ -7076,7 +7082,13 @@ internal sealed partial class Ymm4Facade
         return null;
     }
 
-    private static string Fingerprint(
+    internal static IReadOnlyList<RawItem> EditorialItems(IEnumerable<RawItem> items) =>
+        items.Where(item =>
+            !AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
+            && !item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal))
+        .ToList();
+
+    internal static string Fingerprint(
         IReadOnlyList<RawItem> items,
         string projectPath,
         string sceneId,
@@ -7084,7 +7096,8 @@ internal sealed partial class Ymm4Facade
     {
         var canonical = new StringBuilder();
         canonical.Append(projectPath).Append('|').Append(sceneId).Append('|').Append(fps).AppendLine();
-        foreach (var item in items.OrderBy(value => value.Frame)
+        foreach (var item in EditorialItems(items)
+                     .OrderBy(value => value.Frame)
                      .ThenBy(value => value.Layer)
                      .ThenBy(value => value.TypeName, StringComparer.Ordinal)
                      .ThenBy(value => value.Text, StringComparer.Ordinal)
@@ -7401,17 +7414,57 @@ internal sealed partial class Ymm4Facade
     /// the scene fingerprint.
     internal static int? ReadExactPreviewFrame(object preview, uint fps)
     {
-        foreach (var name in new[] { "CurrentFrame", "Frame", "Position" })
+        var timeline = GetMember(preview, "timeline", "Timeline");
+        var player = GetMember(preview, "player", "Player");
+        foreach (var candidate in new[] { preview, timeline })
         {
-            var value = GetMember(preview, name);
-            if (value is TimeSpan time)
+            if (candidate is null)
             {
-                return checked((int)Math.Round(time.TotalSeconds * fps));
+                continue;
             }
-            if (value is not null && int.TryParse(value.ToString(), out var frame) && frame >= 0)
+            foreach (var name in new[] { "CurrentFrame", "Frame" })
             {
-                return frame;
+                var parsed = ParseExactFrame(GetMember(candidate, name), fps);
+                if (parsed is not null)
+                {
+                    return parsed;
+                }
             }
+        }
+        foreach (var candidate in new[] { preview, player })
+        {
+            if (candidate is null)
+            {
+                continue;
+            }
+            var parsed = ParseExactFrame(GetMember(candidate, "Position"), fps);
+            if (parsed is not null)
+            {
+                return parsed;
+            }
+        }
+        return null;
+    }
+
+    private static int? ParseExactFrame(object? value, uint fps)
+    {
+        if (value is TimeSpan time)
+        {
+            return checked((int)Math.Round(time.TotalSeconds * fps));
+        }
+        if (value is int frame && frame >= 0)
+        {
+            return frame;
+        }
+        if (value is not null
+            && int.TryParse(
+                value.ToString(),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed)
+            && parsed >= 0)
+        {
+            return parsed;
         }
         return null;
     }

@@ -130,6 +130,44 @@ profiles = ["fast", "pr", "nightly"]
 residual = "Verified read-back mechanics remain owned by the YMM4 apply protocol."
 
 [[property]]
+id = "ANN-011"
+module = "annotationPromotionProtocol"
+expression = "editorialFingerprintTracksVerifiedCommits"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Annotation/AnnotationDecorationCodec.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "YMM4 item factory and preview non-render remain an integration boundary."
+
+[[property]]
+id = "ANN-012"
+module = "annotationPromotionProtocol"
+expression = "dismissedCapturesHaveNoDecoration"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.AnnotationDecoration.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "YMM4 Undo that deletes a decoration is not immediately recreated."
+
+[[property]]
+id = "ANN-013"
+module = "annotationPromotionProtocol"
+expression = "decorationsStayOnCapturedProject"
+owner = "takegraph-service"
+criticality = "merge-blocking"
+implementation_paths = [
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Annotation/AnnotationDecorationCodec.cs",
+  "bridges/ymm4/TakeGraph.Ymm4Bridge/Ymm4Facade.AnnotationDecoration.cs",
+]
+profiles = ["fast", "pr", "nightly"]
+residual = "Live project/scene identity is observed from YMM4; the capture host list is not trusted alone."
+
+[[property]]
 id = "REV-001"
 module = "patchProtocol"
 expression = "approvalIsFresh"

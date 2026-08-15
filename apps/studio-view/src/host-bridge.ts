@@ -29,6 +29,40 @@ export interface StagedPatchSummary {
   status: "previewable";
 }
 
+export interface AnnotationIntentRow {
+  kind: string;
+  reason?: string;
+  topic?: string;
+  question?: string;
+  draftHint?: string;
+}
+
+export interface AnnotationTemporalRow {
+  relation: string;
+  referenceFrame: number;
+  startOffsetFrames: number;
+  endOffsetFrames?: number | null;
+}
+
+export interface AnnotationRow {
+  annotationId: string;
+  startFrame: number;
+  endFrame: number;
+  stability: string;
+  lifecycle: string;
+  stale?: boolean | null;
+  transcriptSummary?: string | null;
+  audioSha256?: string | null;
+  transcriptDigest?: string | null;
+  interpretationDigest?: string | null;
+  derivePhase?: string | null;
+  intents: AnnotationIntentRow[];
+  temporal?: AnnotationTemporalRow | null;
+  promotionStatus?: string | null;
+  promotionTaskId?: string | null;
+  promotionPlanDigest?: string | null;
+}
+
 export interface ProjectState {
   projectName: string;
   revision: number;
@@ -55,6 +89,15 @@ export interface StudioHostBridge {
   commitPatch(patchId: string, digest: string): Promise<ProjectState>;
   focusUtterance(utterance: UtteranceSummary): Promise<void>;
   requestFullscreen(): Promise<void>;
+  listAnnotations(): Promise<AnnotationRow[]>;
+  correctAnnotation(annotationId: string, text: string): Promise<AnnotationRow[]>;
+  dismissAnnotation(annotationId: string): Promise<AnnotationRow[]>;
+  interpretAnnotation(annotationId: string): Promise<AnnotationRow[]>;
+  promoteAnnotation(input: {
+    annotationId: string;
+    characterName: string;
+    layer: number;
+  }): Promise<unknown>;
   subscribe(listener: StateListener): () => void;
 }
 
@@ -134,6 +177,53 @@ class McpAppsHostBridge implements StudioHostBridge {
     }
   }
 
+  async listAnnotations(): Promise<AnnotationRow[]> {
+    return this.callAnnotations({ action: "list" });
+  }
+
+  async correctAnnotation(annotationId: string, text: string): Promise<AnnotationRow[]> {
+    await this.callAnnotations({ action: "correct", annotationId, text });
+    return this.listAnnotations();
+  }
+
+  async dismissAnnotation(annotationId: string): Promise<AnnotationRow[]> {
+    await this.callAnnotations({ action: "dismiss", annotationId });
+    return this.listAnnotations();
+  }
+
+  async interpretAnnotation(annotationId: string): Promise<AnnotationRow[]> {
+    await this.callAnnotations({ action: "interpret", annotationId });
+    return this.listAnnotations();
+  }
+
+  async promoteAnnotation(input: {
+    annotationId: string;
+    characterName: string;
+    layer: number;
+  }): Promise<unknown> {
+    return this.callAnnotations({
+      action: "promote",
+      annotationId: input.annotationId,
+      characterName: input.characterName,
+      layer: input.layer,
+    });
+  }
+
+  private async callAnnotations(
+    args: Record<string, unknown>,
+  ): Promise<AnnotationRow[]> {
+    await this.connect();
+    const result = await this.app.callServerTool({
+      name: "studio_annotations",
+      arguments: args,
+    });
+    if (result.isError) {
+      const text = result.content?.find((item) => item.type === "text")?.text;
+      throw new Error(text ?? "studio_annotations failed");
+    }
+    return annotationsFrom(result.structuredContent);
+  }
+
   subscribe(listener: StateListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -161,6 +251,44 @@ class McpAppsHostBridge implements StudioHostBridge {
       listener(state);
     }
   }
+}
+
+function annotationsFrom(value: unknown): AnnotationRow[] {
+  const root = (value ?? {}) as {
+    annotations?: { annotations?: AnnotationRow[] } | AnnotationRow[];
+  };
+  const listed = root.annotations;
+  if (Array.isArray(listed)) return listed;
+  if (listed && Array.isArray(listed.annotations)) return listed.annotations;
+  return [];
+}
+
+function standaloneAnnotations(): AnnotationRow[] {
+  return [
+    {
+      annotationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      startFrame: 2531,
+      endFrame: 2698,
+      stability: "stable",
+      lifecycle: "active",
+      stale: false,
+      transcriptSummary: "今のところ三秒前から残す。ここはCompressionの説明を入れる",
+      intents: [
+        { kind: "highlight", reason: "残す" },
+        { kind: "narration", topic: "Compression" },
+      ],
+      temporal: {
+        relation: "range",
+        referenceFrame: 2531,
+        startOffsetFrames: -180,
+        endOffsetFrames: 0,
+      },
+      promotionStatus: null,
+      derivePhase: "succeeded",
+      audioSha256: `sha256:${"a".repeat(64)}`,
+      transcriptDigest: `sha256:${"b".repeat(64)}`,
+    },
+  ];
 }
 
 function standaloneState(): ProjectState {
@@ -231,6 +359,7 @@ function standaloneState(): ProjectState {
 class StandaloneHostBridge implements StudioHostBridge {
   readonly mode = "standalone" as const;
   private state = standaloneState();
+  private annotations = standaloneAnnotations();
   private readonly listeners = new Set<StateListener>();
   private sequence = 3;
 
@@ -301,6 +430,40 @@ class StandaloneHostBridge implements StudioHostBridge {
 
   async focusUtterance(): Promise<void> {}
   async requestFullscreen(): Promise<void> {}
+
+  async listAnnotations(): Promise<AnnotationRow[]> {
+    return structuredClone(this.annotations);
+  }
+
+  async correctAnnotation(annotationId: string, text: string): Promise<AnnotationRow[]> {
+    this.annotations = this.annotations.map((row) =>
+      row.annotationId === annotationId ? { ...row, transcriptSummary: text } : row,
+    );
+    return this.listAnnotations();
+  }
+
+  async dismissAnnotation(annotationId: string): Promise<AnnotationRow[]> {
+    this.annotations = this.annotations.map((row) =>
+      row.annotationId === annotationId ? { ...row, lifecycle: "dismissed" } : row,
+    );
+    return this.listAnnotations();
+  }
+
+  async interpretAnnotation(annotationId: string): Promise<AnnotationRow[]> {
+    this.annotations = this.annotations.map((row) =>
+      row.annotationId === annotationId
+        ? {
+            ...row,
+            intents: row.intents.length > 0 ? row.intents : [{ kind: "note" }],
+          }
+        : row,
+    );
+    return this.listAnnotations();
+  }
+
+  async promoteAnnotation(): Promise<unknown> {
+    return { operations: [{ op: "native_voice_create" }] };
+  }
 
   subscribe(listener: StateListener): () => void {
     this.listeners.add(listener);

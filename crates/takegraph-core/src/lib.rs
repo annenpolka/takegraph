@@ -19,7 +19,7 @@ pub mod voice;
 pub use annotation::{
     AnnotationCapture, AnnotationError, AnnotationId, AnnotationIntent, AnnotationInterpretation,
     AnnotationTranscript, CaptureSessionId, CaptureStability, CapturedAudioEvidence, SourceAnchor,
-    SourceEvidenceRef,
+    SourceEvidenceRef, TemporalReference, TemporalRelation,
 };
 pub use composition_graph::{
     CompositionError, CompositionGraph, CompositionIntent, CompositionOutcome, EntityId,

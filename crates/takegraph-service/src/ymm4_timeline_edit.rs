@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use takegraph_core::{
     CapabilityDependency, ChangeBudget, Patch, PatchError, PatchStatus, PlanWarning, RevisionId,
-    TARGET_PLAN_CANONICAL_VERSION, TIMELINE_EDIT_MAX_OPERATIONS,
+    SourceEvidenceRef, TARGET_PLAN_CANONICAL_VERSION, TIMELINE_EDIT_MAX_OPERATIONS,
     TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TargetPlan, TimelineEditOperation, TimelineEditPlan,
     approval_digests_match, canonical_sha256,
 };
@@ -30,8 +30,16 @@ pub struct TimelineEditStageManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TimelineEditStageOperation {
-    PortableVoiceCreate { utterance: ManagedUtterance },
-    NativeVoiceCreate { cue: Ymm4NativeVoiceCue },
+    PortableVoiceCreate {
+        utterance: ManagedUtterance,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_evidence: Option<SourceEvidenceRef>,
+    },
+    NativeVoiceCreate {
+        cue: Ymm4NativeVoiceCue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_evidence: Option<SourceEvidenceRef>,
+    },
 }
 
 impl TimelineEditStageManifest {
@@ -80,12 +88,19 @@ fn build_timeline_edit_plan(
     };
 
     let mut operations = Vec::with_capacity(manifest.operations.len());
+    let mut source_evidence = Vec::new();
     let mut target_identity = None;
     let mut expected_scope = None;
     let mut warnings = Vec::new();
     for input in &manifest.operations {
         let mut child = match input {
-            TimelineEditStageOperation::PortableVoiceCreate { utterance } => {
+            TimelineEditStageOperation::PortableVoiceCreate {
+                utterance,
+                source_evidence: evidence,
+            } => {
+                if let Some(evidence) = evidence {
+                    source_evidence.push(evidence.clone());
+                }
                 crate::portable_pair_target_plan(
                     base_revision,
                     operation_id,
@@ -94,7 +109,13 @@ fn build_timeline_edit_plan(
                     capabilities,
                 )?
             }
-            TimelineEditStageOperation::NativeVoiceCreate { cue } => {
+            TimelineEditStageOperation::NativeVoiceCreate {
+                cue,
+                source_evidence: evidence,
+            } => {
+                if let Some(evidence) = evidence {
+                    source_evidence.push(evidence.clone());
+                }
                 crate::native_voice_target_plan(
                     base_revision,
                     operation_id,
@@ -136,6 +157,7 @@ fn build_timeline_edit_plan(
         change_budget,
         operations,
         warnings,
+        source_evidence,
     };
     plan.validate()
         .map_err(|error| Ymm4TimelineEditError::InvalidPlan(error.to_string()))?;
@@ -859,6 +881,7 @@ mod tests {
 
     fn portable(entity: &str) -> TimelineEditStageOperation {
         TimelineEditStageOperation::PortableVoiceCreate {
+            source_evidence: None,
             utterance: ManagedUtterance {
                 entity_id: entity.into(),
                 revision: 1,
@@ -877,6 +900,7 @@ mod tests {
 
     fn native(entity: &str) -> TimelineEditStageOperation {
         TimelineEditStageOperation::NativeVoiceCreate {
+            source_evidence: None,
             cue: Ymm4NativeVoiceCue {
                 realization_id: Uuid::from_u128(22),
                 entity_id: entity.into(),
@@ -1135,10 +1159,33 @@ mod tests {
 
     fn validation_json(request: &serde_json::Value, extra: bool) -> serde_json::Value {
         let plan = &request["timelineEditPlan"];
-        let mut strategies = serde_json::Map::from_iter([
-            ("portable_pair".into(), serde_json::json!(1)),
-            ("native_voice".into(), serde_json::json!(1)),
-        ]);
+        let mut portable = 0_u64;
+        let mut native = 0_u64;
+        let mut create = 0_u64;
+        let mut update = 0_u64;
+        let mut delete = 0_u64;
+        if let Some(operations) = plan["operations"].as_array() {
+            for operation in operations {
+                match operation["cue"]["strategy"].as_str() {
+                    Some("portable_pair") => portable += 1,
+                    Some("native_voice") => native += 1,
+                    _ => {}
+                }
+                match operation["cue"]["action"].as_str() {
+                    Some("create") => create += 1,
+                    Some("update") => update += 1,
+                    Some("delete") => delete += 1,
+                    _ => {}
+                }
+            }
+        }
+        let mut strategies = serde_json::Map::new();
+        if portable > 0 {
+            strategies.insert("portable_pair".into(), serde_json::json!(portable));
+        }
+        if native > 0 {
+            strategies.insert("native_voice".into(), serde_json::json!(native));
+        }
         if extra {
             strategies.insert("unexpected".into(), serde_json::json!(1));
         }
@@ -1147,10 +1194,10 @@ mod tests {
             "planDigest": request["planDigest"],
             "fingerprint": request["expectedFingerprint"],
             "strategyCounts": strategies,
-            "createCount": 2,
-            "updateCount": 0,
-            "deleteCount": 0,
-            "physicalItemCount": 3
+            "createCount": create,
+            "updateCount": update,
+            "deleteCount": delete,
+            "physicalItemCount": portable * 2 + native
         })
     }
 
@@ -1418,5 +1465,129 @@ mod tests {
             assert!(state.external_commits.is_empty());
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn narration_promotion_stages_timeline_edit_without_advancing_head() {
+        let bridge = MockBridge::start(ReceiptMode::Verified, false);
+        let client = Ymm4BridgeClient::new(&bridge.endpoint, "test-token").unwrap();
+        let root = std::env::temp_dir().join(format!("takegraph-promote-stage-{}", Uuid::new_v4()));
+        let annotation_store =
+            crate::annotation_store::AnnotationStore::open_scoped(&root.join("ann"), "project")
+                .unwrap();
+        let project_store =
+            crate::DurableProjectStore::open_scoped_or_bootstrap(&root.join("proj"), "project", RevisionId(0))
+                .unwrap();
+        let capture_id = takegraph_core::AnnotationId::new();
+        annotation_store
+            .import_capture(takegraph_core::AnnotationCapture {
+                id: capture_id,
+                session_id: takegraph_core::CaptureSessionId::new(),
+                start_anchor: takegraph_core::SourceAnchor {
+                    project_id: "project".into(),
+                    scene_id: "scene".into(),
+                    source_fingerprint: BASE_FINGERPRINT.into(),
+                    fps: 60,
+                    frame: 100,
+                    observed_canonical_revision: Some(RevisionId(0)),
+                },
+                end_anchor: takegraph_core::SourceAnchor {
+                    project_id: "project".into(),
+                    scene_id: "scene".into(),
+                    source_fingerprint: BASE_FINGERPRINT.into(),
+                    fps: 60,
+                    frame: 160,
+                    observed_canonical_revision: Some(RevisionId(0)),
+                },
+                audio: takegraph_core::CapturedAudioEvidence {
+                    audio_sha256: format!("sha256:{}", "a".repeat(64)),
+                    byte_length: 32_000,
+                    duration_samples: 16_000,
+                    sample_rate: 16_000,
+                    channels: 1,
+                    bits_per_sample: 16,
+                },
+                captured_at_utc: "2026-08-14T13:34:57Z".into(),
+            })
+            .unwrap();
+        annotation_store
+            .attach_transcript(takegraph_core::AnnotationTranscript {
+                id: Uuid::new_v4(),
+                capture_id,
+                audio_sha256: format!("sha256:{}", "a".repeat(64)),
+                text: "Compressionの説明を入れる".into(),
+                provider_id: "human".into(),
+                provider_digest: format!("sha256:{}", "b".repeat(64)),
+                transcript_digest: format!("sha256:{}", "c".repeat(64)),
+            })
+            .unwrap();
+        annotation_store
+            .attach_interpretation(takegraph_core::AnnotationInterpretation {
+                id: Uuid::new_v4(),
+                capture_id,
+                transcript_digest: format!("sha256:{}", "c".repeat(64)),
+                temporal: takegraph_core::TemporalReference {
+                    reference_frame: 100,
+                    start_offset_frames: 0,
+                    end_offset_frames: Some(60),
+                    relation: takegraph_core::TemporalRelation::Range,
+                },
+                intents: vec![takegraph_core::AnnotationIntent::Narration {
+                    topic: "Compression".into(),
+                    draft_hint: Some("ここで重要なのがPrimary Compressionです。".into()),
+                }],
+                model_id: "heuristic-v1".into(),
+                model_digest: format!("sha256:{}", "d".repeat(64)),
+                interpretation_digest: format!("sha256:{}", "e".repeat(64)),
+            })
+            .unwrap();
+
+        let staged = crate::stage_narration_promotion(
+            &annotation_store,
+            &project_store,
+            &client,
+            target(),
+            capture_id,
+            "ゆっくり霊夢",
+            2,
+            300,
+        )
+        .await
+        .unwrap();
+        assert_eq!(staged.operations.len(), 1);
+        assert!(staged.plan_digest.starts_with("sha256:"));
+        assert_eq!(project_store.head().unwrap(), RevisionId(0));
+        let promotion = annotation_store.capture(capture_id).unwrap().promotion.unwrap();
+        assert_eq!(
+            promotion.status,
+            crate::annotation_store::PromotionStatus::Staged
+        );
+        assert_eq!(promotion.plan_digest, staged.plan_digest);
+        assert_eq!(promotion.task_id, staged.task.operation_id.to_string());
+        let evidence = staged.task.timeline_edit_plan.source_evidence.clone();
+        assert!(!evidence.is_empty());
+        let receipt = format!("sha256:{}", "f".repeat(64));
+        let count = crate::commit_promotions_from_plan(
+            &annotation_store,
+            &evidence,
+            &staged.task.operation_id.to_string(),
+            RevisionId(1),
+            &receipt,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            annotation_store.capture(capture_id).unwrap().promotion.unwrap().status,
+            crate::annotation_store::PromotionStatus::Committed
+        );
+        crate::commit_promotions_from_plan(
+            &annotation_store,
+            &evidence,
+            &staged.task.operation_id.to_string(),
+            RevisionId(1),
+            &receipt,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -58,6 +58,8 @@ takegraph_task_execute {
 
 After a `timeline_edit` stage, `availableActions` is typically `inspect` + `execute`. There is no separate approve step. Pass the exact `planDigest` on execute.
 
+Promote a narration annotation as ordinary `timeline_edit` `native_voice_create` operations. Include `sourceEvidence` (`annotationId`, `captureAudioSha256`, `transcriptDigest`, `interpretationDigest`) on each promoted operation so the plan digest binds the capture. The studio notes Promote button and `annotation promote --stage` stage that same `timeline_edit` and record `promotionStatus`. If inspect already shows `promotionStatus: staged`, execute the reported `promotionPlanDigest` — do not restage the same capture. After a verified execute, inspect shows `promotionStatus: committed`. `CutCandidate` stays evidence-only. Do not add a new task kind.
+
 ## Two stores
 
 | Store | What it is | Head field |
@@ -77,7 +79,7 @@ Never copy an ID, take, utterance, or revision from one store into the other. St
 | `takegraph_task_execute` | `run` / `review` / `revalidate` / `cancel` / `collect_artifacts` | Invent a digest |
 | `takegraph_task_decide` | Human accept/reject of reviewed evidence | Automated judgment |
 
-Inspect views: `overview`, `studio`, `canonical`, `scene`, `catalog`, `tasks`, `task` (requires `taskId`). `view: "scene"` is a read-only composition observation. PNG visual review is a separate `scene_inspection` task.
+Inspect views: `overview`, `studio`, `canonical`, `scene`, `catalog`, `tasks`, `task` (requires `taskId`), `annotations`. `view: "scene"` is a read-only composition observation. PNG visual review is a separate `scene_inspection` task. `view: "annotations"` lists captured voice notes (IDs, frames, `audioSha256`, `transcriptDigest`, `interpretationDigest`, `derivePhase`, transcript summaries, intent candidates, temporal range, `promotionStatus`, `promotionTaskId`, `promotionPlanDigest`). Recording is local-only; do not start capture from MCP. Transcribe or interpret an existing capture with `annotation_derive`. Copy the inspect digests into `timeline_edit` `sourceEvidence` when promoting, unless a staged promotion is already listed. Inspect never reports audio paths, device IDs, capture tokens, or ASR executable/model paths.
 
 ## Choose kind
 
@@ -90,6 +92,7 @@ Inspect views: `overview`, `studio`, `canonical`, `scene`, `catalog`, `tasks`, `
 | Portrait / media / effect / template | `native_extension` | Not in `timeline_edit`. Bind exact catalog digests |
 | Studio demo take / variant | `studio_take` / `studio_voice_variant` | Studio store only |
 | PNG frame review | `scene_inspection` | Approve → execute capture/review → human `decide` |
+| Transcribe or interpret a captured voice note | `annotation_derive` | `mode=transcribe` / `interpret` / `correct`. Pass `captureId` only. Never send ASR paths |
 | Verified save | `checkpoint` | Ordinary writes need an initialized named project |
 | Render | `render` | Only after a verified checkpoint, a bindable catalog profile, and an absolute `outputPath` |
 | Drift report / follow-up | `reconciliation` | Needs an existing target link; do not invent one |
@@ -107,6 +110,7 @@ Typical `availableActions` after a successful stage (still follow the live envel
 | `native_extension` | `approve` → `execute` |
 | `scene_inspection` | `approve` → `execute` until reviewed → `decide` |
 | `studio_take` | `execute` |
+| `annotation_derive` | `execute` with `planDigest` (no approve) |
 
 ## Envelope rules
 
@@ -193,6 +197,34 @@ takegraph_task_decide {
 
 Repeat inspection `execute` only while `availableActions` still includes `execute`. Call `decide` only after an explicit human accept/reject. Automated findings cannot decide.
 
+Transcribe or interpret an already-captured note (does not start the microphone):
+
+```
+takegraph_inspect { "view": "annotations" }
+takegraph_task_stage {
+  "kind": "annotation_derive",
+  "captureId": "<annotationId from inspect>",
+  "mode": "transcribe"
+}
+takegraph_task_execute {
+  "taskId": "<derive taskId>",
+  "intent": "run",
+  "planDigest": "<derive planDigest>"
+}
+takegraph_task_stage {
+  "kind": "annotation_derive",
+  "captureId": "<same annotationId>",
+  "mode": "interpret"
+}
+takegraph_task_execute {
+  "taskId": "<second derive taskId>",
+  "intent": "run",
+  "planDigest": "<second planDigest>"
+}
+```
+
+`mode=correct` takes `text`. Host ASR must already be configured (`TAKEGRAPH_WHISPER_EXECUTABLE` + `TAKEGRAPH_WHISPER_MODEL`). Never invent those paths. A failed derive leaves the capture intact.
+
 ## Fail closed
 
 - Ordinary canonical writes require an initialized, named YMM4 project.
@@ -201,3 +233,4 @@ Repeat inspection `execute` only while `availableActions` still includes `execut
 - If there is no target link, do not stage `reconciliation` `mode=report`.
 - Do not enable or use legacy route-specific tools unless the user said those routes are on.
 - Do not treat a green inspect as proof that YMM4, VOICEVOX, or a renderer did I/O you did not run.
+- Do not start recording from MCP. If `annotation_derive` `mode=transcribe` fails closed, stop and tell the user to configure a local whisper executable and model.

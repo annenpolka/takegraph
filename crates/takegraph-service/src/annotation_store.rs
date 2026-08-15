@@ -219,6 +219,28 @@ impl AnnotationStore {
         &self.project_id
     }
 
+    /// Returns the project-scoped store directory (events, locks, and
+    /// capture-host audio CAS live here).
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.root
+    }
+
+    /// Content-addressed WAV path for a captured audio digest, if the digest
+    /// is well-formed. The file may still be absent.
+    #[must_use]
+    pub fn audio_artifact_path(&self, audio_sha256: &str) -> Option<PathBuf> {
+        let hex = audio_sha256.strip_prefix("sha256:").filter(|value| {
+            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })?;
+        Some(
+            self.root
+                .join("audio")
+                .join(&hex[..2])
+                .join(format!("{hex}.wav")),
+        )
+    }
+
     /// Imports a capture. Same ID with byte-identical content replays
     /// idempotently; same ID with different audio conflicts.
     ///
@@ -468,6 +490,13 @@ impl AnnotationStore {
                 .promotion
                 .as_ref()
                 .ok_or_else(|| AnnotationStoreError::NoStagedPromotion(key.clone()))?;
+            if promotion.status == PromotionStatus::Committed
+                && promotion.task_id == task_id
+                && promotion.committed_revision == Some(committed_revision)
+                && promotion.receipt_digest.as_deref() == Some(receipt_digest.as_str())
+            {
+                return Ok(());
+            }
             if promotion.status != PromotionStatus::Staged
                 || promotion.task_id != task_id
                 || promotion.base_revision >= committed_revision
@@ -921,6 +950,12 @@ mod tests {
             id: Uuid::new_v4(),
             capture_id,
             transcript_digest: transcript_digest.into(),
+            temporal: takegraph_core::TemporalReference {
+                reference_frame: 2531,
+                start_offset_frames: -90,
+                end_offset_frames: Some(0),
+                relation: takegraph_core::TemporalRelation::Range,
+            },
             intents: vec![takegraph_core::AnnotationIntent::Narration {
                 topic: "Primary Compression".into(),
                 draft_hint: None,
@@ -954,6 +989,23 @@ mod tests {
         ));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audio_artifact_path_follows_cas_layout() {
+        let root = test_root();
+        let store = AnnotationStore::open_scoped(&root, "project-a").unwrap();
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let path = store.audio_artifact_path(&digest).unwrap();
+        assert!(
+            path.ends_with(
+                std::path::Path::new("audio")
+                    .join("ab")
+                    .join(format!("{}.wav", "ab".repeat(32)))
+            )
+        );
+        assert!(store.audio_artifact_path("not-a-digest").is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1178,6 +1230,18 @@ mod tests {
         let promotion = store.capture(id).unwrap().promotion.unwrap();
         assert_eq!(promotion.status, PromotionStatus::Committed);
         assert_eq!(promotion.committed_revision, Some(RevisionId(5)));
+        store
+            .commit_promotion(
+                id,
+                "task-1",
+                RevisionId(5),
+                format!("sha256:{}", "2".repeat(64)),
+            )
+            .unwrap();
+        assert_eq!(
+            store.capture(id).unwrap().promotion.unwrap().status,
+            PromotionStatus::Committed
+        );
 
         assert!(matches!(
             store.stage_promotion(
