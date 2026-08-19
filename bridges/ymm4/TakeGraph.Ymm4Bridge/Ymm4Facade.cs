@@ -279,6 +279,10 @@ internal sealed partial class Ymm4Facade
 
     private static string SceneCompositionKind(string typeName)
     {
+        if (typeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal))
+        {
+            return "annotation";
+        }
         var separator = typeName.LastIndexOf('.');
         var kind = separator >= 0 ? typeName[(separator + 1)..] : typeName;
         if (kind.EndsWith("Item", StringComparison.Ordinal) && kind.Length > "Item".Length)
@@ -6295,6 +6299,11 @@ internal sealed partial class Ymm4Facade
         var projectId = Hash($"project|{projectPath}");
         var managed = ReadManagedItems(rawItems, projectId);
         var managedObjects = FindManagedRawItems(rawItems, projectId)
+            .Concat(rawItems.Where(item =>
+                AnnotationDecorationCodec.TryDecodePin(item.Remark, out var pin)
+                && pin is not null
+                && string.Equals(pin.ProjectId, projectId, StringComparison.Ordinal))
+                .Select(item => item.Item))
             .ToHashSet(ReferenceEqualityComparer.Instance);
         var projectName = GetString(main, "ProjectName", "Title");
         if (string.IsNullOrWhiteSpace(projectName) && !string.IsNullOrWhiteSpace(projectPath))
@@ -6327,8 +6336,7 @@ internal sealed partial class Ymm4Facade
             nativeExtensions,
             rawItems.Count(item =>
                 !managedObjects.Contains(item.Item)
-                && !AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
-                && !item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal)));
+                && !IsEditorialAnnotationItem(item)));
     }
 
     private static string CurrentProjectId()
@@ -6364,6 +6372,28 @@ internal sealed partial class Ymm4Facade
                 voiceItem.CharacterName,
                 marker.RealizationId.ToString("D"),
                 voiceItem.SpokenText));
+        }
+        foreach (var pinItem in rawItems)
+        {
+            if (!AnnotationDecorationCodec.TryDecodePin(pinItem.Remark, out var pin)
+                || pin is null
+                || string.IsNullOrWhiteSpace(pin.EntityId)
+                || !string.Equals(pin.ProjectId, projectId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            result.Add(new ManagedItemDto(
+                pin.EntityId,
+                0,
+                "annotation",
+                pinItem.Frame,
+                pinItem.Layer,
+                pinItem.Length,
+                LabelOfAnnotationItem(pinItem),
+                null,
+                null,
+                null,
+                pin.RealizationId.ToString("D")));
         }
         foreach (var captionItem in rawItems)
         {
@@ -7083,10 +7113,27 @@ internal sealed partial class Ymm4Facade
     }
 
     internal static IReadOnlyList<RawItem> EditorialItems(IEnumerable<RawItem> items) =>
-        items.Where(item =>
-            !AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
-            && !item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal))
-        .ToList();
+        items.Where(IsEditorialItem).ToList();
+
+    internal static bool IsEditorialItem(RawItem item) =>
+        AnnotationDecorationCodec.IsPin(item.Remark) || !IsEditorialAnnotationItem(item);
+
+    private static bool IsEditorialAnnotationItem(RawItem item) =>
+        AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
+        || (item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal)
+            && !AnnotationDecorationCodec.IsPin(item.Remark));
+
+    private static string LabelOfAnnotationItem(RawItem item)
+    {
+#if !TAKEGRAPH_YMM4_CONTRACT_STUB
+        if (item.Item is TakeGraphAnnotationItem annotation
+            && !string.IsNullOrWhiteSpace(annotation.Label))
+        {
+            return annotation.Label;
+        }
+#endif
+        return string.IsNullOrWhiteSpace(item.Text) ? "メモ" : item.Text;
+    }
 
     internal static string Fingerprint(
         IReadOnlyList<RawItem> items,

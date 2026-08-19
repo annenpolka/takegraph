@@ -243,6 +243,8 @@ test("annotation inventory text names IDs and refuses capture from MCP", () => {
         promotionStatus: "staged",
         promotionTaskId: "55555555-5555-4555-8555-555555555555",
         promotionPlanDigest: `sha256:${"2".repeat(64)}`,
+        pinEntityId: "ann-aaaaaaaa-pin",
+        pinRealizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       },
     ],
   });
@@ -254,6 +256,7 @@ test("annotation inventory text names IDs and refuses capture from MCP", () => {
   assert.match(text, /transcriptDigest=sha256:b{64}/);
   assert.match(text, /promotion=staged/);
   assert.match(text, /promotionPlanDigest=sha256:2{64}/);
+  assert.match(text, /pinEntityId=ann-aaaaaaaa-pin/);
   assert.match(text, /do not restage/);
   assert.match(text, /recording is local-only/);
   assert.match(text, /annotation_derive/);

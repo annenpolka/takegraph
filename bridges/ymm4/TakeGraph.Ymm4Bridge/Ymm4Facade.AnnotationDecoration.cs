@@ -66,11 +66,18 @@ internal sealed partial class Ymm4Facade
         Func<AnnotationDecorationPlan, object> create)
     {
         var desired = AnnotationDecorationCodec.PlansFrom(annotations, liveProjectId, liveSceneId);
-        var desiredIds = desired.Select(plan => plan.AnnotationId).ToHashSet();
         var existing = new Dictionary<Guid, RawItem>();
         var stale = new List<object>();
+        var pinned = new HashSet<Guid>();
+        var seen = new HashSet<Guid>();
+        var ambiguous = new HashSet<Guid>();
         foreach (var item in items)
         {
+            if (AnnotationDecorationCodec.TryDecodePin(item.Remark, out var pin) && pin is not null)
+            {
+                pinned.Add(pin.AnnotationId);
+                continue;
+            }
             if ((!AnnotationDecorationCodec.TryDecode(item.Remark, out var marker)
                     && !AnnotationDecorationCodec.TryDecode(item.Text, out marker))
                 || marker is null)
@@ -82,11 +89,17 @@ internal sealed partial class Ymm4Facade
                 stale.Add(item.Item);
                 continue;
             }
-            if (!existing.ContainsKey(marker.AnnotationId))
+            if (!seen.Add(marker.AnnotationId))
             {
-                existing[marker.AnnotationId] = item;
+                ambiguous.Add(marker.AnnotationId);
+                existing.Remove(marker.AnnotationId);
+                continue;
             }
+            existing[marker.AnnotationId] = item;
         }
+        desired = desired.Where(plan => !pinned.Contains(plan.AnnotationId)
+            && !ambiguous.Contains(plan.AnnotationId)).ToList();
+        var desiredIds = desired.Select(plan => plan.AnnotationId).ToHashSet();
 
         var removals = existing
             .Where(pair => !desiredIds.Contains(pair.Key))

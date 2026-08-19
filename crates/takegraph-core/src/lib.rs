@@ -74,7 +74,7 @@ pub use reconciliation::{
 };
 pub use revision::{Patch, PatchError, PatchId, PatchStatus, RevisionId};
 pub use timeline_edit::{
-    TIMELINE_EDIT_MAX_OPERATIONS, TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TimelineEditError,
-    TimelineEditOperation, TimelineEditPlan,
+    PlannedAnnotationMarker, TIMELINE_EDIT_MAX_OPERATIONS, TIMELINE_EDIT_PLAN_CANONICAL_VERSION,
+    TimelineEditError, TimelineEditOperation, TimelineEditPlan,
 };
 pub use voice::{AudioArtifact, VoiceTake, VoiceTakeError, VoiceTakeStatus, VoiceTaskIdentity};

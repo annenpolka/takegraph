@@ -1,7 +1,10 @@
 //! Promote a narration interpretation through an existing timeline edit.
 
 use takegraph_core::{AnnotationId, AnnotationIntent, CaptureStability, SourceEvidenceRef};
-use takegraph_node::{Ymm4BridgeClient, Ymm4NativeVoiceCue, Ymm4ProjectSnapshot};
+use takegraph_node::{
+    ManagedItemKind, Ymm4AnnotationMarkerCue, Ymm4BridgeClient, Ymm4ManagedItem,
+    Ymm4NativeVoiceCue, Ymm4ProjectSnapshot,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -28,8 +31,16 @@ pub enum PromotionError {
     MissingInterpretation(String),
     #[error("capture {0} has no narration intent to promote")]
     NoNarration(String),
+    #[error("capture {0} has no interpretation to pin")]
+    NoInterpretation(String),
     #[error("characterName must not be empty")]
     EmptyCharacter,
+    #[error("entityId must not be empty")]
+    EmptyEntity,
+    #[error("capture {0} has no pinned annotation marker on the live target")]
+    PinNotFound(String),
+    #[error("capture {0} already has a staged promotion")]
+    AlreadyStaged(String),
     #[error("capture {0} is stale against the current source")]
     StaleSource(String),
     #[error("capture {0} belongs to a different project")]
@@ -125,6 +136,196 @@ pub fn narration_promotion_operations(
     Ok(operations)
 }
 
+/// Builds an annotation-marker create bound to source evidence.
+///
+/// Highlight, Note, Verify, and CutCandidate may be pinned. The pin is a
+/// digest-bound `AnnotationItem`, not a VoiceItem, and never carries the
+/// captured WAV.
+///
+/// # Errors
+///
+/// Returns a guard failure for dismissed or source-changed captures, or when
+/// no interpretation is attached.
+pub fn pin_promotion_operations(
+    projection: &CaptureProjection,
+    layer: i32,
+) -> Result<Vec<TimelineEditStageOperation>, PromotionError> {
+    let key = projection.capture.id.0.to_string();
+    if projection.lifecycle == CaptureLifecycle::Dismissed {
+        return Err(PromotionError::Dismissed(key));
+    }
+    if projection.stability == CaptureStability::SourceChanged {
+        return Err(PromotionError::SourceChanged(key));
+    }
+    let interpretation = projection
+        .interpretation
+        .as_ref()
+        .ok_or_else(|| PromotionError::NoInterpretation(key.clone()))?;
+    let transcript = projection
+        .transcript
+        .as_ref()
+        .ok_or_else(|| PromotionError::NoInterpretation(key.clone()))?;
+    let evidence = SourceEvidenceRef {
+        annotation_id: projection.capture.id,
+        capture_audio_sha256: projection.capture.audio.audio_sha256.clone(),
+        transcript_digest: transcript.transcript_digest.clone(),
+        interpretation_digest: interpretation.interpretation_digest.clone(),
+    };
+    evidence.validate()?;
+    let start = projection.capture.start_anchor.frame.max(0);
+    let end = projection.capture.end_anchor.frame;
+    let length = (end - start).max(1);
+    let label = transcript
+        .text
+        .chars()
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    let label = if label.is_empty() {
+        "メモ".to_owned()
+    } else {
+        label
+    };
+    Ok(vec![TimelineEditStageOperation::AnnotationMarkerCreate {
+        marker: Ymm4AnnotationMarkerCue {
+            realization_id: Uuid::new_v4(),
+            entity_id: annotation_pin_entity_id(projection.capture.id),
+            annotation_id: projection.capture.id.0,
+            project_id: projection.capture.start_anchor.project_id.clone(),
+            frame: start,
+            layer,
+            length,
+            label,
+        },
+        source_evidence: Some(evidence),
+    }])
+}
+
+/// Builds an annotation-marker delete bound to the existing pin identity.
+///
+/// Unpin is its own edit and is not implied by dismiss.
+///
+/// # Errors
+///
+/// Returns a guard failure for dismissed or source-changed captures.
+pub fn unpin_promotion_operations(
+    projection: &CaptureProjection,
+    entity_id: &str,
+    realization_id: Uuid,
+    frame: i32,
+    layer: i32,
+    length: i32,
+) -> Result<Vec<TimelineEditStageOperation>, PromotionError> {
+    let key = projection.capture.id.0.to_string();
+    if projection.lifecycle == CaptureLifecycle::Dismissed {
+        return Err(PromotionError::Dismissed(key));
+    }
+    if projection.stability == CaptureStability::SourceChanged {
+        return Err(PromotionError::SourceChanged(key));
+    }
+    if entity_id.trim().is_empty() {
+        return Err(PromotionError::EmptyEntity);
+    }
+    let interpretation = projection
+        .interpretation
+        .as_ref()
+        .ok_or_else(|| PromotionError::NoInterpretation(key.clone()))?;
+    let transcript = projection
+        .transcript
+        .as_ref()
+        .ok_or_else(|| PromotionError::NoInterpretation(key.clone()))?;
+    let evidence = SourceEvidenceRef {
+        annotation_id: projection.capture.id,
+        capture_audio_sha256: projection.capture.audio.audio_sha256.clone(),
+        transcript_digest: transcript.transcript_digest.clone(),
+        interpretation_digest: interpretation.interpretation_digest.clone(),
+    };
+    evidence.validate()?;
+    Ok(vec![TimelineEditStageOperation::AnnotationMarkerDelete {
+        marker: Ymm4AnnotationMarkerCue {
+            realization_id,
+            entity_id: entity_id.to_owned(),
+            annotation_id: projection.capture.id.0,
+            project_id: projection.capture.start_anchor.project_id.clone(),
+            frame,
+            layer,
+            length,
+            label: "メモ".into(),
+        },
+        source_evidence: Some(evidence),
+    }])
+}
+
+/// Deterministic write identity for a capture pin.
+#[must_use]
+pub fn annotation_pin_entity_id(capture_id: AnnotationId) -> String {
+    let short = capture_id.0.simple().to_string();
+    format!("ann-{}-pin", &short[..8])
+}
+
+/// Finds the live owned pin for `capture_id`, if the snapshot reports one.
+#[must_use]
+pub fn find_pin_item<'a>(
+    target: &'a Ymm4ProjectSnapshot,
+    capture_id: AnnotationId,
+) -> Option<&'a Ymm4ManagedItem> {
+    let entity_id = annotation_pin_entity_id(capture_id);
+    target
+        .managed_items
+        .iter()
+        .find(|item| item.kind == ManagedItemKind::Annotation && item.entity_id == entity_id)
+}
+
+/// Unpin only binds the live project, not the capture-time editorial fingerprint.
+/// The pin itself is an editorial item, so the live fingerprint already moved.
+///
+/// # Errors
+///
+/// Returns [`PromotionError::ProjectMismatch`].
+pub fn assert_pin_project(
+    projection: &CaptureProjection,
+    target: &Ymm4ProjectSnapshot,
+) -> Result<(), PromotionError> {
+    let key = projection.capture.id.0.to_string();
+    if target.project_id != projection.capture.start_anchor.project_id {
+        return Err(PromotionError::ProjectMismatch(key));
+    }
+    Ok(())
+}
+
+fn maybe_record_additional_promotion(
+    annotation_store: &AnnotationStore,
+    capture_id: AnnotationId,
+    task_id: &str,
+    plan_digest: &str,
+    base_revision: takegraph_core::RevisionId,
+) -> Result<(), PromotionError> {
+    match record_staged_promotion(
+        annotation_store,
+        capture_id,
+        task_id,
+        plan_digest,
+        base_revision,
+    ) {
+        Ok(()) => Ok(()),
+        Err(PromotionError::Store(
+            crate::annotation_store::AnnotationStoreError::PromotionAlreadyStaged(key),
+        )) => {
+            let existing = annotation_store.capture(capture_id)?;
+            match existing
+                .promotion
+                .as_ref()
+                .map(|promotion| promotion.status)
+            {
+                Some(crate::annotation_store::PromotionStatus::Committed) => Ok(()),
+                _ => Err(PromotionError::AlreadyStaged(key)),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Refuses promotion when the live YMM4 source is not the captured one.
 ///
 /// # Errors
@@ -143,6 +344,107 @@ pub fn assert_promotion_target(
         return Err(PromotionError::StaleSource(key));
     }
     Ok(())
+}
+
+/// Stages a pin as an ordinary `timeline_edit` and records promotion status.
+///
+/// # Errors
+///
+/// Returns a promotion guard, unsaved-project, or timeline-edit failure.
+pub async fn stage_pin_promotion(
+    annotation_store: &AnnotationStore,
+    project_store: &DurableProjectStore,
+    client: &Ymm4BridgeClient,
+    target: Ymm4ProjectSnapshot,
+    capture_id: AnnotationId,
+    layer: i32,
+) -> Result<StagedNarrationPromotion, PromotionError> {
+    let projection = annotation_store.capture(capture_id)?;
+    assert_promotion_target(&projection, &target)?;
+    let operations = pin_promotion_operations(&projection, layer)?;
+    let head = project_store.head()?;
+    let task = Ymm4TimelineEditTask::stage_from_snapshot(
+        client,
+        head,
+        target,
+        TimelineEditStageManifest {
+            operations: operations.clone(),
+            max_changed_entities: None,
+        },
+    )
+    .await?;
+    let plan_digest = task
+        .timeline_edit_plan
+        .canonical_digest()
+        .map_err(crate::Ymm4TimelineEditError::from)?;
+    maybe_record_additional_promotion(
+        annotation_store,
+        capture_id,
+        &task.operation_id.to_string(),
+        &plan_digest,
+        head,
+    )?;
+    Ok(StagedNarrationPromotion {
+        operations,
+        task,
+        plan_digest,
+    })
+}
+
+/// Stages an unpin as an ordinary `timeline_edit` against the live pin identity.
+///
+/// # Errors
+///
+/// Returns a promotion guard, missing pin, or timeline-edit failure.
+pub async fn stage_unpin_promotion(
+    annotation_store: &AnnotationStore,
+    project_store: &DurableProjectStore,
+    client: &Ymm4BridgeClient,
+    target: Ymm4ProjectSnapshot,
+    capture_id: AnnotationId,
+) -> Result<StagedNarrationPromotion, PromotionError> {
+    let projection = annotation_store.capture(capture_id)?;
+    assert_pin_project(&projection, &target)?;
+    let pin = find_pin_item(&target, capture_id)
+        .ok_or_else(|| PromotionError::PinNotFound(projection.capture.id.0.to_string()))?;
+    let realization_id = pin
+        .realization_id
+        .ok_or_else(|| PromotionError::PinNotFound(projection.capture.id.0.to_string()))?;
+    let operations = unpin_promotion_operations(
+        &projection,
+        &pin.entity_id,
+        realization_id,
+        pin.frame,
+        pin.layer,
+        pin.length,
+    )?;
+    let head = project_store.head()?;
+    let task = Ymm4TimelineEditTask::stage_from_snapshot(
+        client,
+        head,
+        target,
+        TimelineEditStageManifest {
+            operations: operations.clone(),
+            max_changed_entities: None,
+        },
+    )
+    .await?;
+    let plan_digest = task
+        .timeline_edit_plan
+        .canonical_digest()
+        .map_err(crate::Ymm4TimelineEditError::from)?;
+    maybe_record_additional_promotion(
+        annotation_store,
+        capture_id,
+        &task.operation_id.to_string(),
+        &plan_digest,
+        head,
+    )?;
+    Ok(StagedNarrationPromotion {
+        operations,
+        task,
+        plan_digest,
+    })
 }
 
 /// One staged narration promotion bound to an ordinary timeline-edit task.
@@ -171,12 +473,8 @@ pub async fn stage_narration_promotion(
 ) -> Result<StagedNarrationPromotion, PromotionError> {
     let projection = annotation_store.capture(capture_id)?;
     assert_promotion_target(&projection, &target)?;
-    let operations = narration_promotion_operations(
-        &projection,
-        character_name,
-        layer,
-        default_max_length,
-    )?;
+    let operations =
+        narration_promotion_operations(&projection, character_name, layer, default_max_length)?;
     let head = project_store.head()?;
     let task = Ymm4TimelineEditTask::stage_from_snapshot(
         client,
@@ -420,6 +718,115 @@ mod tests {
         ));
         target.project_id = "project-a".into();
         assert!(assert_promotion_target(&loaded, &target).is_ok());
+    }
+
+    #[test]
+    fn pin_is_an_annotation_marker_with_evidence() {
+        let id = AnnotationId::new();
+        let ops = pin_promotion_operations(
+            &projection(
+                id,
+                vec![AnnotationIntent::Highlight {
+                    reason: Some("残す".into()),
+                }],
+            ),
+            90,
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 1);
+        let TimelineEditStageOperation::AnnotationMarkerCreate {
+            marker,
+            source_evidence,
+        } = &ops[0]
+        else {
+            panic!("expected pin create");
+        };
+        assert_eq!(marker.annotation_id, id.0);
+        assert_eq!(marker.project_id, "project-a");
+        assert_eq!(marker.frame, 2531);
+        assert_eq!(marker.length, 167);
+        assert_eq!(marker.layer, 90);
+        assert_eq!(marker.entity_id, annotation_pin_entity_id(id));
+        assert_eq!(source_evidence.as_ref().unwrap().annotation_id, id);
+    }
+
+    #[test]
+    fn unpin_uses_live_pin_identity_and_evidence() {
+        let id = AnnotationId::new();
+        let realization = Uuid::from_u128(99);
+        let ops = unpin_promotion_operations(
+            &projection(id, vec![AnnotationIntent::Note]),
+            &annotation_pin_entity_id(id),
+            realization,
+            2531,
+            90,
+            167,
+        )
+        .unwrap();
+        let TimelineEditStageOperation::AnnotationMarkerDelete {
+            marker,
+            source_evidence,
+        } = &ops[0]
+        else {
+            panic!("expected unpin delete");
+        };
+        assert_eq!(marker.entity_id, annotation_pin_entity_id(id));
+        assert_eq!(marker.realization_id, realization);
+        assert_eq!(marker.frame, 2531);
+        assert_eq!(source_evidence.as_ref().unwrap().annotation_id, id);
+    }
+
+    #[test]
+    fn find_pin_item_matches_deterministic_entity() {
+        let id = AnnotationId::new();
+        let entity = annotation_pin_entity_id(id);
+        let realization = Uuid::from_u128(7);
+        let target = takegraph_node::Ymm4ProjectSnapshot {
+            project_id: "project-a".into(),
+            project_name: "project-a".into(),
+            project_path: "project.ymmp".into(),
+            scene_id: "scene-1".into(),
+            fps: 60,
+            fingerprint: "fp-1".into(),
+            managed_items: vec![takegraph_node::Ymm4ManagedItem {
+                entity_id: entity.clone(),
+                revision: 0,
+                kind: ManagedItemKind::Annotation,
+                frame: 12,
+                layer: 90,
+                length: 30,
+                text: Some("メモ".into()),
+                spoken_text: None,
+                audio_path: None,
+                artifact_hash: None,
+                speaker: None,
+                realization_id: Some(realization),
+            }],
+            native_extensions: vec![],
+            unmanaged_context_count: 0,
+        };
+        let found = find_pin_item(&target, id).expect("pin");
+        assert_eq!(found.entity_id, entity);
+        assert_eq!(found.realization_id, Some(realization));
+        assert!(find_pin_item(&target, AnnotationId::new()).is_none());
+    }
+
+    #[test]
+    fn pin_refuses_dismissed_and_source_changed() {
+        let id = AnnotationId::new();
+        let loaded = projection(id, vec![AnnotationIntent::Note]);
+        let mut dismissed = loaded.clone();
+        dismissed.lifecycle = CaptureLifecycle::Dismissed;
+        assert!(matches!(
+            pin_promotion_operations(&dismissed, 90),
+            Err(PromotionError::Dismissed(_))
+        ));
+        let mut changed = loaded;
+        changed.stability = CaptureStability::SourceChanged;
+        assert!(matches!(
+            pin_promotion_operations(&changed, 90),
+            Err(PromotionError::SourceChanged(_))
+        ));
     }
 
     #[test]

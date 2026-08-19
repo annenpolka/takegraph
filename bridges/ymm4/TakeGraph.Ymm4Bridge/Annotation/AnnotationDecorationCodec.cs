@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace TakeGraph.Ymm4Bridge;
 
@@ -7,11 +8,14 @@ internal sealed record AnnotationDecorationMarker(
     string Namespace,
     string ProjectId,
     Guid AnnotationId,
-    Guid RealizationId);
+    Guid RealizationId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? EntityId = null);
 
 internal static class AnnotationDecorationCodec
 {
     internal const string Namespace = "takegraph/annotation/v1";
+    internal const string PinNamespace = "takegraph/annotation-pin/v1";
     internal const int Layer = 90;
     private const string Start = "[[takegraph:";
     private const string End = "]]";
@@ -50,15 +54,28 @@ internal static class AnnotationDecorationCodec
     internal static bool TryDecode(string? remark, out AnnotationDecorationMarker? marker)
     {
         marker = Decode(remark);
-        return marker is not null
-            && string.Equals(marker.Namespace, Namespace, StringComparison.Ordinal)
-            && !string.IsNullOrWhiteSpace(marker.ProjectId)
-            && marker.AnnotationId != Guid.Empty
-            && marker.RealizationId != Guid.Empty;
+        return IsComplete(marker)
+            && string.Equals(marker!.Namespace, Namespace, StringComparison.Ordinal);
+    }
+
+    internal static bool TryDecodePin(string? remark, out AnnotationDecorationMarker? marker)
+    {
+        marker = Decode(remark);
+        return IsComplete(marker)
+            && string.Equals(marker!.Namespace, PinNamespace, StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(marker.EntityId);
     }
 
     internal static bool IsDecoration(string? remark, string? text = null) =>
         TryDecode(remark, out _) || TryDecode(text, out _);
+
+    internal static bool IsPin(string? remark) => TryDecodePin(remark, out _);
+
+    private static bool IsComplete(AnnotationDecorationMarker? marker) =>
+        marker is not null
+        && !string.IsNullOrWhiteSpace(marker.ProjectId)
+        && marker.AnnotationId != Guid.Empty
+        && marker.RealizationId != Guid.Empty;
 
     internal static IReadOnlyList<AnnotationDecorationPlan> PlansFrom(
         IEnumerable<CaptureAnnotationDto> annotations,

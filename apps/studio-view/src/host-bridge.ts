@@ -61,6 +61,11 @@ export interface AnnotationRow {
   promotionStatus?: string | null;
   promotionTaskId?: string | null;
   promotionPlanDigest?: string | null;
+  pinEntityId?: string | null;
+  pinRealizationId?: string | null;
+  pinFrame?: number | null;
+  pinLayer?: number | null;
+  pinLength?: number | null;
 }
 
 export interface ProjectState {
@@ -98,6 +103,8 @@ export interface StudioHostBridge {
     characterName: string;
     layer: number;
   }): Promise<unknown>;
+  pinAnnotation(annotationId: string): Promise<unknown>;
+  unpinAnnotation(annotationId: string): Promise<unknown>;
   subscribe(listener: StateListener): () => void;
 }
 
@@ -206,6 +213,21 @@ class McpAppsHostBridge implements StudioHostBridge {
       annotationId: input.annotationId,
       characterName: input.characterName,
       layer: input.layer,
+    });
+  }
+
+  async pinAnnotation(annotationId: string): Promise<unknown> {
+    return this.callAnnotations({
+      action: "pin",
+      annotationId,
+      layer: 90,
+    });
+  }
+
+  async unpinAnnotation(annotationId: string): Promise<unknown> {
+    return this.callAnnotations({
+      action: "unpin",
+      annotationId,
     });
   }
 
@@ -463,6 +485,14 @@ class StandaloneHostBridge implements StudioHostBridge {
 
   async promoteAnnotation(): Promise<unknown> {
     return { operations: [{ op: "native_voice_create" }] };
+  }
+
+  async pinAnnotation(): Promise<unknown> {
+    return { operations: [{ op: "annotation_marker_create" }] };
+  }
+
+  async unpinAnnotation(): Promise<unknown> {
+    return { operations: [{ op: "annotation_marker_delete" }] };
   }
 
   subscribe(listener: StateListener): () => void {

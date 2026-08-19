@@ -145,7 +145,7 @@ fn poll_toggle(
 #[cfg(windows)]
 fn pump_pending_messages() {
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     };
 
     let mut msg = MSG::default();

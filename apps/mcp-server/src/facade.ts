@@ -396,6 +396,26 @@ const timelineEditOperationSchema = z.discriminatedUnion("op", [
     maxLength: z.number().int().positive(),
     sourceEvidence: sourceEvidenceSchema.optional(),
   }),
+  z.object({
+    op: z.literal("annotation_marker_create"),
+    entityId: z.string().min(1),
+    annotationId: z.string().uuid(),
+    frame: z.number().int().min(0),
+    layer: z.number().int().min(0),
+    length: z.number().int().positive(),
+    label: z.string().min(1).optional(),
+    sourceEvidence: sourceEvidenceSchema.optional(),
+  }),
+  z.object({
+    op: z.literal("annotation_marker_delete"),
+    entityId: z.string().min(1),
+    realizationId: z.string().uuid(),
+    annotationId: z.string().uuid(),
+    frame: z.number().int().min(0),
+    layer: z.number().int().min(0),
+    length: z.number().int().positive(),
+    sourceEvidence: sourceEvidenceSchema.optional(),
+  }),
 ]);
 
 const timelineEditStageSchema = z
@@ -690,6 +710,11 @@ function projectAnnotationInspect(raw: unknown): UnknownRecord {
         promotionTaskId: row.promotionTaskId ?? null,
         promotionPlanDigest: row.promotionPlanDigest ?? null,
         promotionBaseRevision: row.promotionBaseRevision ?? null,
+        pinEntityId: row.pinEntityId ?? null,
+        pinRealizationId: row.pinRealizationId ?? null,
+        pinFrame: row.pinFrame ?? null,
+        pinLayer: row.pinLayer ?? null,
+        pinLength: row.pinLength ?? null,
       };
     }),
   };
@@ -2766,7 +2791,7 @@ export function registerFacadeTools(
     {
       title: "Stage TakeGraph task",
       description:
-        "Create an immutable candidate, observation, or digest-bound plan through its owning store. timeline_edit accepts 1-128 ordered portable and native voice creates in one atomic managed-cue plan. annotation_derive transcribes or interprets an existing captureId without host paths. Native extensions remain on their separate guarded task kind. Staging never substitutes for approval or execution.",
+        "Create an immutable candidate, observation, or digest-bound plan through its owning store. timeline_edit accepts 1-128 ordered portable and native voice creates, plus annotation_marker_create/delete pins, in one atomic plan. annotation_derive transcribes or interprets an existing captureId without host paths. Native extensions remain on their separate guarded task kind. Staging never substitutes for approval or execution.",
       inputSchema: stageHostInputSchema,
       outputSchema: taskEnvelopeOutputShape,
       annotations: { destructiveHint: false },

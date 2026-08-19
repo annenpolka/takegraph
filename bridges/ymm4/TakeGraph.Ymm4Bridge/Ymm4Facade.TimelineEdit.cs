@@ -109,6 +109,9 @@ internal sealed partial class Ymm4Facade
                 var expectedItems = parsed.PortableUtterances
                     .SelectMany(ToManagedItems)
                     .Concat(parsed.NativeVoiceCues.Select(ToExpectedNativeVoiceItem))
+                    .Concat(parsed.AnnotationMarkers
+                        .Where(value => value.Action == "create")
+                        .Select(ToExpectedAnnotationItem))
                     .ToArray();
                 recoveryStore.Put(CreateRecoveryEntry(
                     parsed.OperationId,
@@ -120,8 +123,11 @@ internal sealed partial class Ymm4Facade
                     TimelineEditRecoveryDriver,
                     parsed.PortableUtterances.Select(value => value.EntityId)
                         .Concat(parsed.NativeVoiceCues.Select(value => value.EntityId))
+                        .Concat(parsed.AnnotationMarkers.Select(value => value.EntityId))
                         .ToArray(),
-                    parsed.NativeVoiceCues.Select(value => value.RealizationId).ToArray(),
+                    parsed.NativeVoiceCues.Select(value => value.RealizationId)
+                        .Concat(parsed.AnnotationMarkers.Select(value => value.RealizationId))
+                        .ToArray(),
                     expectedItems,
                     new Dictionary<Guid, string>(),
                     preparation.BeforeItems));
@@ -297,7 +303,7 @@ internal sealed partial class Ymm4Facade
         string declaredDigest,
         JsonElement root)
     {
-        RequireExactJsonProperties(
+        RequireAllowedJsonProperties(
             root,
             "canonicalVersion",
             "operationId",
@@ -307,7 +313,8 @@ internal sealed partial class Ymm4Facade
             "expectedScope",
             "changeBudget",
             "operations",
-            "warnings");
+            "warnings",
+            "sourceEvidence");
         if (RequireJsonInt(root, "canonicalVersion") != 1)
         {
             throw new BridgeValidationException("Unsupported timeline-edit canonicalVersion");
@@ -317,6 +324,7 @@ internal sealed partial class Ymm4Facade
         {
             throw new BridgeValidationException("Timeline-edit operationId must not be empty");
         }
+        ValidateOptionalSourceEvidence(root);
         var planDigest = RequireSha256(declaredDigest, "planDigest");
         if (!ApplyRequestDigest.Matches(
                 planDigest,
@@ -351,7 +359,7 @@ internal sealed partial class Ymm4Facade
         bool validateCurrentScope,
         bool validateArtifacts)
     {
-        RequireExactJsonProperties(
+        RequireAllowedJsonProperties(
             root,
             "canonicalVersion",
             "operationId",
@@ -361,7 +369,8 @@ internal sealed partial class Ymm4Facade
             "expectedScope",
             "changeBudget",
             "operations",
-            "warnings");
+            "warnings",
+            "sourceEvidence");
         if (RequireJsonInt(root, "canonicalVersion") != 1)
         {
             throw new BridgeValidationException("Unsupported timeline-edit canonicalVersion");
@@ -371,6 +380,7 @@ internal sealed partial class Ymm4Facade
         {
             throw new BridgeValidationException("Timeline-edit operationId must not be empty");
         }
+        ValidateOptionalSourceEvidence(root);
         _ = RequireJsonULong(root, "baseRevision");
         var planDigest = RequireSha256(declaredDigest, "planDigest");
         var calculatedDigest = CanonicalJson.Sha256(TimelineEditPlanDomain, root);
@@ -452,17 +462,38 @@ internal sealed partial class Ymm4Facade
         }
         var portable = new List<ManagedUtteranceDto>();
         var native = new List<NativeVoiceCueDto>();
+        var markers = new List<AnnotationMarkerDto>();
         var operations = new List<TimelineManagedOperation>();
         var actions = new List<string>();
         var entityIds = new HashSet<string>(StringComparer.Ordinal);
         var realizationIds = new HashSet<Guid>();
         foreach (var operationValue in operationValues)
         {
+            var kind = RequireJsonString(operationValue, "kind");
+            if (kind == "annotation_marker")
+            {
+                RequireExactJsonProperties(operationValue, "kind", "marker");
+                var marker = ParseAnnotationMarker(
+                    RequireJsonObject(operationValue, "marker"),
+                    snapshot,
+                    entityIds,
+                    realizationIds,
+                    validateCurrentScope);
+                markers.Add(marker);
+                actions.Add(marker.Action);
+                operations.Add(new TimelineManagedOperation(
+                    "annotation_marker",
+                    marker.Action,
+                    null,
+                    null,
+                    marker));
+                continue;
+            }
             RequireExactJsonProperties(operationValue, "kind", "cue");
-            if (RequireJsonString(operationValue, "kind") != "managed_cue")
+            if (kind != "managed_cue")
             {
                 throw new BridgeValidationException(
-                    "This bridge profile supports only managed_cue timeline-edit operations; native_extension fails closed");
+                    "This bridge profile supports only managed_cue and annotation_marker timeline-edit operations; native_extension fails closed");
             }
             var beforePortable = portable.Count;
             var beforeNative = native.Count;
@@ -507,7 +538,7 @@ internal sealed partial class Ymm4Facade
                     "Timeline-edit managed cue identity collides with a native extension",
                     snapshot.Fingerprint);
             }
-            ValidateTimelineEditPayloads(portable, native, verifyArtifacts: validateArtifacts);
+            ValidateTimelineEditPayloads(portable, native, markers, verifyArtifacts: validateArtifacts);
             Application.Current.Dispatcher.Invoke(() =>
             {
                 if (portable.Count > 0)
@@ -522,11 +553,12 @@ internal sealed partial class Ymm4Facade
         }
         else
         {
-            ValidateTimelineEditPayloads(portable, native, verifyArtifacts: false);
+            ValidateTimelineEditPayloads(portable, native, markers, verifyArtifacts: false);
         }
         var strategyCounts = new SortedDictionary<string, int>(StringComparer.Ordinal);
         if (portable.Count > 0) strategyCounts["portable_pair"] = portable.Count;
         if (native.Count > 0) strategyCounts["native_voice"] = native.Count;
+        if (markers.Count > 0) strategyCounts["annotation_marker"] = markers.Count;
         return new ParsedTimelineEdit(
             operationId,
             planDigest,
@@ -536,6 +568,7 @@ internal sealed partial class Ymm4Facade
             operations,
             portable,
             native,
+            markers,
             new TimelineEditValidationDto(
                 operationId,
                 planDigest,
@@ -544,7 +577,7 @@ internal sealed partial class Ymm4Facade
                 actions.Count(value => value == "create"),
                 actions.Count(value => value == "update"),
                 actions.Count(value => value == "delete"),
-                portable.Count * 2 + native.Count));
+                portable.Count * 2 + native.Count + markers.Count(value => value.Action == "create")));
     }
 
     /// Mixed timeline-edit may be portable-only, native-only, or both. Empty
@@ -552,12 +585,19 @@ internal sealed partial class Ymm4Facade
     internal static void ValidateTimelineEditPayloads(
         IReadOnlyList<ManagedUtteranceDto> portable,
         IReadOnlyList<NativeVoiceCueDto> native,
+        bool verifyArtifacts) =>
+        ValidateTimelineEditPayloads(portable, native, [], verifyArtifacts);
+
+    internal static void ValidateTimelineEditPayloads(
+        IReadOnlyList<ManagedUtteranceDto> portable,
+        IReadOnlyList<NativeVoiceCueDto> native,
+        IReadOnlyList<AnnotationMarkerDto> markers,
         bool verifyArtifacts)
     {
-        if (portable.Count == 0 && native.Count == 0)
+        if (portable.Count == 0 && native.Count == 0 && markers.Count == 0)
         {
             throw new BridgeValidationException(
-                "Timeline-edit requires at least one portable or native managed cue");
+                "Timeline-edit requires at least one portable, native, or annotation-marker operation");
         }
         if (portable.Count > 0)
         {
@@ -566,6 +606,21 @@ internal sealed partial class Ymm4Facade
         if (native.Count > 0)
         {
             ValidateNativeVoiceCues(native);
+        }
+        foreach (var marker in markers)
+        {
+            if (marker.Action is not ("create" or "delete")
+                || string.IsNullOrWhiteSpace(marker.EntityId)
+                || string.IsNullOrWhiteSpace(marker.ProjectId)
+                || string.IsNullOrWhiteSpace(marker.Label)
+                || marker.RealizationId == Guid.Empty
+                || marker.AnnotationId == Guid.Empty
+                || marker.Frame < 0
+                || marker.Layer < 0
+                || marker.Length <= 0)
+            {
+                throw new BridgeValidationException("Annotation marker payload is incomplete");
+            }
         }
     }
 
@@ -578,7 +633,9 @@ internal sealed partial class Ymm4Facade
         NativeVoicePreparation? native = parsed.NativeVoiceCues.Count == 0
             ? null
             : PrepareNativeVoiceBatch(parsed.NativeVoiceCues, parsed.ProjectId);
-        var timeline = portable.Values.FirstOrDefault()?.Timeline ?? native?.Timeline
+        var timeline = portable.Values.FirstOrDefault()?.Timeline
+            ?? native?.Timeline
+            ?? (parsed.AnnotationMarkers.Count > 0 ? RequireActiveTimeline() : null)
             ?? throw new BridgeValidationException("Timeline-edit has no supported operation");
         if (portable.Values.Any(value => !ReferenceEquals(value.Timeline, timeline))
             || native is not null && !ReferenceEquals(native.Timeline, timeline))
@@ -611,6 +668,13 @@ internal sealed partial class Ymm4Facade
                         preparation.Native.KnownItems.Add(item);
                     }
                 }
+                BridgeFaultInjection.ThrowIf("after_partial_mutation");
+                continue;
+            }
+            if (operation.Kind == "annotation_marker")
+            {
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                    ApplyAnnotationMarker(preparation.Timeline, operation.Marker!));
                 BridgeFaultInjection.ThrowIf("after_partial_mutation");
                 continue;
             }
@@ -692,9 +756,11 @@ internal sealed partial class Ymm4Facade
         ProjectSnapshotDto snapshot)
     {
         var entities = parsed.PortableUtterances.Select(value => value.EntityId)
+            .Concat(parsed.AnnotationMarkers.Select(value => value.EntityId))
             .ToHashSet(StringComparer.Ordinal);
         var realizations = parsed.NativeVoiceCues
             .Select(value => value.RealizationId.ToString("D"))
+            .Concat(parsed.AnnotationMarkers.Select(value => value.RealizationId.ToString("D")))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return snapshot.ManagedItems.Where(item =>
                 entities.Contains(item.EntityId)
@@ -709,9 +775,26 @@ internal sealed partial class Ymm4Facade
         var portableActual = actual.Where(item => parsed.PortableUtterances.Any(value =>
             value.EntityId == item.EntityId)).ToArray();
         var portableExpected = parsed.PortableUtterances.SelectMany(ToManagedItems).ToArray();
-        var nativeActual = actual.Where(item => item.RealizationId is not null).ToArray();
+        var nativeActual = actual.Where(item =>
+                item.Kind == "voice"
+                && item.RealizationId is not null
+                && parsed.NativeVoiceCues.Any(cue =>
+                    string.Equals(cue.RealizationId.ToString("D"), item.RealizationId, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+        var markerActual = actual.Where(item => item.Kind == "annotation").ToArray();
+        var markerExpected = parsed.AnnotationMarkers
+            .Where(value => value.Action == "create")
+            .Select(ToExpectedAnnotationItem)
+            .ToArray();
+        var deletesGone = parsed.AnnotationMarkers
+            .Where(value => value.Action == "delete")
+            .All(marker => markerActual.All(item =>
+                item.EntityId != marker.EntityId
+                && !string.Equals(item.RealizationId, marker.RealizationId.ToString("D"), StringComparison.OrdinalIgnoreCase)));
         return Equivalent(portableActual, portableExpected)
-            && NativeVoiceItemsMatch(parsed.NativeVoiceCues, nativeActual);
+            && NativeVoiceItemsMatch(parsed.NativeVoiceCues, nativeActual)
+            && Equivalent(markerActual, markerExpected)
+            && deletesGone;
     }
 
     private static ManagedItemDto ToExpectedNativeVoiceItem(NativeVoiceCueDto cue) => new(
@@ -727,6 +810,188 @@ internal sealed partial class Ymm4Facade
         cue.CharacterName,
         cue.RealizationId.ToString("D"),
         cue.SpokenText);
+
+    private static ManagedItemDto ToExpectedAnnotationItem(AnnotationMarkerDto marker) => new(
+        marker.EntityId,
+        0,
+        "annotation",
+        marker.Frame,
+        marker.Layer,
+        marker.Length,
+        marker.Label,
+        null,
+        null,
+        null,
+        marker.RealizationId.ToString("D"));
+
+    private static void ValidateOptionalSourceEvidence(JsonElement root)
+    {
+        if (!root.TryGetProperty("sourceEvidence", out var evidence))
+        {
+            return;
+        }
+        if (evidence.ValueKind != JsonValueKind.Array)
+        {
+            throw new BridgeValidationException("sourceEvidence must be an array");
+        }
+        foreach (var item in evidence.EnumerateArray())
+        {
+            RequireExactJsonProperties(
+                item,
+                "annotationId",
+                "captureAudioSha256",
+                "transcriptDigest",
+                "interpretationDigest");
+            _ = RequireJsonGuid(item, "annotationId");
+            _ = RequireSha256(RequireJsonString(item, "captureAudioSha256"), "captureAudioSha256");
+            _ = RequireSha256(RequireJsonString(item, "transcriptDigest"), "transcriptDigest");
+            _ = RequireSha256(RequireJsonString(item, "interpretationDigest"), "interpretationDigest");
+        }
+    }
+
+    private static AnnotationMarkerDto ParseAnnotationMarker(
+        JsonElement marker,
+        ProjectSnapshotDto snapshot,
+        HashSet<string> entityIds,
+        HashSet<Guid> realizationIds,
+        bool validateCurrentScope)
+    {
+        RequireExactJsonProperties(
+            marker,
+            "realizationId",
+            "action",
+            "entityId",
+            "annotationId",
+            "projectId",
+            "frame",
+            "layer",
+            "length",
+            "label",
+            "capabilityDependencies");
+        var action = RequireJsonString(marker, "action");
+        if (action is not ("create" or "delete"))
+        {
+            throw new BridgeValidationException("annotation marker action must be create or delete");
+        }
+        var entityId = RequireJsonString(marker, "entityId");
+        if (!entityIds.Add(entityId))
+        {
+            throw new BridgeValidationException("annotation marker entityId collides inside the plan");
+        }
+        var realizationId = RequireJsonGuid(marker, "realizationId");
+        if (realizationId == Guid.Empty || !realizationIds.Add(realizationId))
+        {
+            throw new BridgeValidationException("annotation marker realizationId is empty or duplicated");
+        }
+        var projectId = RequireJsonString(marker, "projectId");
+        if (validateCurrentScope && projectId != snapshot.ProjectId)
+        {
+            throw new BridgeConflictException(
+                "annotation marker projectId differs from the live YMM4 project",
+                snapshot.Fingerprint);
+        }
+        foreach (var dependency in RequireJsonArray(marker, "capabilityDependencies").EnumerateArray())
+        {
+            RequireAllowedJsonProperties(dependency, "feature", "minimumVersion", "schemaDigest");
+            _ = RequireJsonString(dependency, "feature");
+            _ = RequireJsonInt(dependency, "minimumVersion");
+        }
+        var parsed = new AnnotationMarkerDto(
+            realizationId,
+            action,
+            entityId,
+            RequireJsonGuid(marker, "annotationId"),
+            projectId,
+            RequireNonNegativeJsonInt(marker, "frame"),
+            RequireNonNegativeJsonInt(marker, "layer"),
+            RequirePositiveJsonInt(marker, "length"),
+            RequireJsonString(marker, "label"));
+        if (validateCurrentScope)
+        {
+            var existing = snapshot.ManagedItems.Any(item =>
+                item.Kind == "annotation"
+                && (item.EntityId == entityId
+                    || string.Equals(
+                        item.RealizationId,
+                        realizationId.ToString("D"),
+                        StringComparison.OrdinalIgnoreCase)));
+            if (action == "create" && existing)
+            {
+                throw new BridgeConflictException(
+                    "annotation marker entity already exists on the live target",
+                    snapshot.Fingerprint);
+            }
+            if (action == "delete" && !existing)
+            {
+                throw new BridgeConflictException(
+                    "annotation marker to delete is missing from the live target",
+                    snapshot.Fingerprint);
+            }
+        }
+        return parsed;
+    }
+
+    private static object RequireActiveTimeline()
+    {
+        var main = RequireMainViewModel();
+        var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
+            ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
+        return GetField(timelineViewModel, "timeline")
+            ?? GetMember(timelineViewModel, "Timeline")
+            ?? timelineViewModel;
+    }
+
+    private static void ApplyAnnotationMarker(object timeline, AnnotationMarkerDto marker)
+    {
+        var main = RequireMainViewModel();
+        var mainModel = RequireMainModel(main);
+        var items = ReadItems(GetMember(main, "ActiveTimelineViewModel") ?? timeline);
+        if (marker.Action == "delete")
+        {
+            var removals = items
+                .Where(item =>
+                    AnnotationDecorationCodec.TryDecodePin(item.Remark, out var pin)
+                    && pin is not null
+                    && (pin.RealizationId == marker.RealizationId
+                        || string.Equals(pin.EntityId, marker.EntityId, StringComparison.Ordinal)))
+                .Select(item => item.Item)
+                .ToArray();
+            if (removals.Length == 0)
+            {
+                throw new BridgeValidationException(
+                    "annotation marker delete found no matching pin");
+            }
+            InvokeItemsMethod(timeline, "DeleteItems", removals);
+            return;
+        }
+        var created = CreatePinItem(marker);
+        AddDecorationItems(mainModel, timeline, [created]);
+    }
+
+    private static object CreatePinItem(AnnotationMarkerDto marker)
+    {
+#if TAKEGRAPH_YMM4_CONTRACT_STUB
+        throw new BridgeUnavailableException("annotation pins require the live YMM4 contract");
+#else
+        var item = new TakeGraphAnnotationItem();
+        item.SetLabel(marker.Label);
+        SetRequired(item, marker.Frame, "Frame");
+        SetRequired(item, marker.Layer, "Layer");
+        SetRequired(item, marker.Length, "Length");
+        SetRequired(
+            item,
+            AnnotationDecorationCodec.Append(
+                null,
+                new AnnotationDecorationMarker(
+                    AnnotationDecorationCodec.PinNamespace,
+                    marker.ProjectId,
+                    marker.AnnotationId,
+                    marker.RealizationId,
+                    marker.EntityId)),
+            "Remark");
+        return item;
+#endif
+    }
 
     private static void EnsureTimelineEditReceiptBinding(
         TimelineEditApplyRequestDto request,
@@ -770,7 +1035,8 @@ internal sealed partial class Ymm4Facade
         string Kind,
         string Action,
         ManagedUtteranceDto? Portable,
-        NativeVoiceCueDto? Native);
+        NativeVoiceCueDto? Native,
+        AnnotationMarkerDto? Marker = null);
 
     private sealed record TimelineEditBinding(
         Guid OperationId,
@@ -787,6 +1053,7 @@ internal sealed partial class Ymm4Facade
         IReadOnlyList<TimelineManagedOperation> Operations,
         IReadOnlyList<ManagedUtteranceDto> PortableUtterances,
         IReadOnlyList<NativeVoiceCueDto> NativeVoiceCues,
+        IReadOnlyList<AnnotationMarkerDto> AnnotationMarkers,
         TimelineEditValidationDto Validation);
 
     private sealed class TimelineEditPreparation(

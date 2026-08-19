@@ -154,10 +154,8 @@ mod tests {
 
     #[test]
     fn file_extra_args_are_path_free() {
-        let root = std::env::temp_dir().join(format!(
-            "takegraph-whisper-cfg-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("takegraph-whisper-cfg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let executable = root.join("whisper-cli.exe");
         let model = root.join("model.bin");

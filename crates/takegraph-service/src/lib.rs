@@ -58,9 +58,11 @@ pub use project_store::{
     ProjectInitializationReservationStatus, ProjectStoreError, TargetLink, VerifiedTargetBinding,
 };
 pub use promotion::{
-    PromotionError, StagedNarrationPromotion, assert_promotion_target,
-    commit_promotions_from_plan, narration_promotion_operations, record_committed_promotion,
-    record_staged_promotion, stage_narration_promotion,
+    PromotionError, StagedNarrationPromotion, annotation_pin_entity_id, assert_pin_project,
+    assert_promotion_target, commit_promotions_from_plan, find_pin_item,
+    narration_promotion_operations, pin_promotion_operations, record_committed_promotion,
+    record_staged_promotion, stage_narration_promotion, stage_pin_promotion, stage_unpin_promotion,
+    unpin_promotion_operations,
 };
 pub use scene_inspection::{
     ChangedCueFrameRange, SceneCaptureEvidence, SceneCaptureProfile, SceneCaptureSamplePlan,

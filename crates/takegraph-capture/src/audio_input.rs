@@ -464,7 +464,10 @@ mod tests {
                 is_default: false,
             },
         ];
-        assert_eq!(preferred_input(&devices).map(|d| d.id.as_str()), Some("1:headset"));
+        assert_eq!(
+            preferred_input(&devices).map(|d| d.id.as_str()),
+            Some("1:headset")
+        );
     }
 
     #[test]

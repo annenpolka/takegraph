@@ -386,6 +386,24 @@ export function App() {
               return state ?? (await bridge.loadProjectState());
             });
           }}
+          onPin={() => {
+            if (!selectedAnnotationId) return;
+            void run(async () => {
+              await bridge.pinAnnotation(selectedAnnotationId);
+              const rows = await bridge.listAnnotations();
+              setAnnotations(rows);
+              return state ?? (await bridge.loadProjectState());
+            });
+          }}
+          onUnpin={() => {
+            if (!selectedAnnotationId) return;
+            void run(async () => {
+              await bridge.unpinAnnotation(selectedAnnotationId);
+              const rows = await bridge.listAnnotations();
+              setAnnotations(rows);
+              return state ?? (await bridge.loadProjectState());
+            });
+          }}
         />
       </section>
     </main>

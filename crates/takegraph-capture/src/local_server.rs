@@ -283,12 +283,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use crate::anchor::ObservedComposition;
     use crate::audio_input::ScriptedAudio;
     use crate::clock::FixedClock;
     use crate::error::CaptureError;
     use crate::session::{CaptureLimits, CompositionObserver, PublicHostState, ScriptedObserver};
+    use async_trait::async_trait;
     use takegraph_node::{
         YMM4_SCENE_COMPOSITION_SCHEMA_VERSION, Ymm4CompositionAvailability,
         Ymm4CompositionCompleteness, Ymm4CompositionViewport, Ymm4SceneCompositionSnapshot,

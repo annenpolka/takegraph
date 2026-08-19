@@ -16,6 +16,7 @@ module ymm4CompositionGraphProtocol {
   type ItemKind =
     | AudioItem
     | VoiceItem
+    | AnnotationItem
     | AssetItem
     | TextItem
     | ShapeItem
@@ -450,6 +451,14 @@ module ymm4CompositionGraphProtocol {
     state.status == Idle,
     not(state.focusExists),
     state' = stagedKnownCreate(state, VoiceItem),
+  }
+
+  // AnnotationItem is a known non-visual family. It may occupy the focus
+  // slot and be created or deleted, but it cannot carry visual references.
+  action stageCreateAnnotation = all {
+    state.status == Idle,
+    not(state.focusExists),
+    state' = stagedKnownCreate(state, AnnotationItem),
   }
 
   action stageCreateAsset = all {
@@ -1025,6 +1034,7 @@ module ymm4CompositionGraphProtocol {
     beginNextEdit,
     stageCreateAudio,
     stageCreateVoice,
+    stageCreateAnnotation,
     stageCreateAsset,
     stageCreateText,
     stageCreateShape,
@@ -1461,6 +1471,24 @@ module ymm4CompositionGraphProtocol {
       state.lastDeletedFocusId == initialFocusId,
       state.focusExists,
       state.focusKind == ShapeItem,
+      state.focusId == transitionId + 1,
+      state.focusBirthId == state.focusId,
+      state.revision == initialRevision + 2,
+    })
+
+  run annotationItemIsKnownAndNonVisualTest = init
+    .then(stageDeleteFocus)
+    .then(applyDeleteFocus)
+    .then(beginNextEdit)
+    .then(stageCreateAnnotation)
+    .then(applyCreate)
+    .expect(all {
+      compositionGraphSafety,
+      state.status == Applied,
+      state.focusExists,
+      state.focusKind == AnnotationItem,
+      isKnownKind(state.focusKind),
+      not(isVisualKind(state.focusKind)),
       state.focusId == transitionId + 1,
       state.focusBirthId == state.focusId,
       state.revision == initialRevision + 2,

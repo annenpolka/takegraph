@@ -36,6 +36,7 @@ pub type EntityId = i64;
 pub enum ItemKind {
     AudioItem,
     VoiceItem,
+    AnnotationItem,
     AssetItem,
     TextItem,
     ShapeItem,
@@ -1071,6 +1072,7 @@ mod tests {
         let kinds = [
             ItemKind::AudioItem,
             ItemKind::VoiceItem,
+            ItemKind::AnnotationItem,
             ItemKind::AssetItem,
             ItemKind::TextItem,
             ItemKind::ShapeItem,
@@ -1095,6 +1097,38 @@ mod tests {
             assert_eq!(graph.focus().expect("focus").kind, kind);
             assert_eq!(graph.focus().expect("focus").id, TRANSITION_ID + 1);
         }
+    }
+
+    #[test]
+    fn annotation_item_is_known_and_non_visual() {
+        assert!(is_known_kind(ItemKind::AnnotationItem));
+        assert!(!is_visual_kind(ItemKind::AnnotationItem));
+        let mut graph = CompositionGraph::representative();
+        graph
+            .stage(
+                CompositionIntent::DeleteEntity,
+                INITIAL_FOCUS_ID,
+                ItemKind::TextItem,
+            )
+            .expect("delete");
+        apply_ok(&mut graph);
+        graph
+            .stage_create(ItemKind::AnnotationItem)
+            .expect("stage annotation");
+        apply_ok(&mut graph);
+        let focus = graph.focus().expect("focus");
+        assert_eq!(focus.kind, ItemKind::AnnotationItem);
+        graph
+            .stage(
+                CompositionIntent::AttachFocusReferences,
+                focus.id,
+                ItemKind::AnnotationItem,
+            )
+            .expect("stage attach");
+        assert_eq!(
+            graph.apply_staged().expect_err("non-visual"),
+            CompositionError::UnsafeReference
+        );
     }
 
     #[test]

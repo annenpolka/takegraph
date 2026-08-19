@@ -33,6 +33,8 @@ export function AnnotationsPanel(props: {
   onDismiss(): void;
   onInterpret(): void;
   onPromote(): void;
+  onPin(): void;
+  onUnpin(): void;
 }) {
   const selected = props.annotations.find((row) => row.annotationId === props.selectedId);
   return (
@@ -144,10 +146,39 @@ export function AnnotationsPanel(props: {
                     ? "昇格済み"
                     : "ナレーションを timeline_edit へ"}
               </button>
+              <button
+                type="button"
+                className="secondary"
+                disabled={
+                  props.busy ||
+                  !selected.interpretationDigest ||
+                  selected.lifecycle !== "active" ||
+                  selected.stability === "source_changed" ||
+                  selected.promotionStatus === "staged" ||
+                  Boolean(selected.pinEntityId)
+                }
+                onClick={props.onPin}
+              >
+                {selected.pinEntityId ? "ピン済み" : "メモをピン"}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                disabled={
+                  props.busy ||
+                  !selected.pinEntityId ||
+                  selected.promotionStatus === "staged"
+                }
+                onClick={props.onUnpin}
+              >
+                ピンを外す
+              </button>
               <small className="notes-hint">
                 {selected.promotionPlanDigest
                   ? `planDigest ${selected.promotionPlanDigest}. 実行は既存の timeline_edit。`
-                  : "CutCandidate は証拠のまま残します。音声パスは出しません。"}
+                  : selected.pinEntityId
+                    ? `pin ${selected.pinEntityId}. 外すときも timeline_edit。`
+                    : "CutCandidate は証拠のまま残します。音声パスは出しません。"}
               </small>
             </>
           ) : (

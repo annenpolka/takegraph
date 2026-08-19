@@ -14,10 +14,12 @@ use takegraph_core::{
 use takegraph_node::{HeuristicInterpreter, WhisperCppProvider};
 use takegraph_service::annotation_store::{AnnotationStore, PromotionStatus};
 use takegraph_service::{
-    AnnotationDeriveMode, AnnotationDerivePlan, AnnotationDeriveStore, TranscriptionJobStore,
-    attach_human_interpretation, attach_human_transcript, interpret_capture,
-    DurableProjectStore, narration_promotion_operations, record_committed_promotion,
-    record_staged_promotion, run_annotation_derive, stage_narration_promotion, transcribe_capture,
+    AnnotationDeriveMode, AnnotationDerivePlan, AnnotationDeriveStore, DurableProjectStore,
+    TranscriptionJobStore, attach_human_interpretation, attach_human_transcript, find_pin_item,
+    interpret_capture, narration_promotion_operations, pin_promotion_operations,
+    record_committed_promotion, record_staged_promotion, run_annotation_derive,
+    stage_narration_promotion, stage_pin_promotion, stage_unpin_promotion, transcribe_capture,
+    unpin_promotion_operations,
 };
 use uuid::Uuid;
 
@@ -167,6 +169,62 @@ pub enum AnnotationCommand {
         project_id: Option<String>,
         #[command(flatten)]
         connection: Ymm4Connection,
+    },
+    /// Build a timeline_edit annotation_marker_create pin from one capture.
+    Pin {
+        #[arg(long)]
+        capture: String,
+        #[arg(long, default_value_t = 90)]
+        layer: i32,
+        /// Stage the ordinary timeline_edit plan. Does not execute or mutate YMM4.
+        #[arg(long)]
+        stage: bool,
+        #[arg(long)]
+        task: Option<PathBuf>,
+        #[arg(
+            long,
+            env = "TAKEGRAPH_ANNOTATION_STORE_ROOT",
+            default_value = ".takegraph/annotation-store"
+        )]
+        annotation_root: PathBuf,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
+    },
+    /// Build a timeline_edit annotation_marker_delete unpin from one capture.
+    Unpin {
+        #[arg(long)]
+        capture: String,
+        #[arg(long = "entity-id")]
+        entity_id: Option<String>,
+        #[arg(long = "realization-id")]
+        realization_id: Option<String>,
+        #[arg(long)]
+        frame: Option<i32>,
+        #[arg(long)]
+        layer: Option<i32>,
+        #[arg(long)]
+        length: Option<i32>,
+        /// Stage the ordinary timeline_edit plan. Does not execute or mutate YMM4.
+        #[arg(long)]
+        stage: bool,
+        #[arg(long)]
+        task: Option<PathBuf>,
+        #[arg(
+            long,
+            env = "TAKEGRAPH_ANNOTATION_STORE_ROOT",
+            default_value = ".takegraph/annotation-store"
+        )]
+        annotation_root: PathBuf,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[command(flatten)]
+        connection: Ymm4Connection,
+        #[command(flatten)]
+        state: ProjectStateOptions,
     },
     /// Build a timeline_edit native_voice_create set from narration intents.
     Promote {
@@ -466,6 +524,64 @@ pub async fn run(command: AnnotationCommand) -> Result<(), Box<dyn std::error::E
             )?;
             Ok(())
         }
+        AnnotationCommand::Pin {
+            capture,
+            layer,
+            stage,
+            task,
+            annotation_root,
+            project_id,
+            connection,
+            state,
+        } => {
+            print_json(
+                &pin_annotation(PinRequest {
+                    capture,
+                    layer,
+                    stage,
+                    task,
+                    annotation_root,
+                    project_id,
+                    connection,
+                    state_root: state.state_root,
+                })
+                .await?,
+            )?;
+            Ok(())
+        }
+        AnnotationCommand::Unpin {
+            capture,
+            entity_id,
+            realization_id,
+            frame,
+            layer,
+            length,
+            stage,
+            task,
+            annotation_root,
+            project_id,
+            connection,
+            state,
+        } => {
+            print_json(
+                &unpin_annotation(UnpinRequest {
+                    capture,
+                    entity_id,
+                    realization_id,
+                    frame,
+                    layer,
+                    length,
+                    stage,
+                    task,
+                    annotation_root,
+                    project_id,
+                    connection,
+                    state_root: state.state_root,
+                })
+                .await?,
+            )?;
+            Ok(())
+        }
         AnnotationCommand::Promote {
             capture,
             character_name,
@@ -639,6 +755,16 @@ struct AnnotationListItem {
     promotion_task_id: Option<String>,
     promotion_plan_digest: Option<String>,
     promotion_base_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_entity_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_realization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_frame: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_layer: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin_length: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -657,7 +783,7 @@ async fn list_annotations(
     connection: Ymm4Connection,
 ) -> Result<AnnotationList, Box<dyn std::error::Error>> {
     let (project_id, source_fingerprint) =
-        resolve_project_scope(project_id, source_fingerprint, connection).await?;
+        resolve_project_scope(project_id.clone(), source_fingerprint, connection.clone()).await?;
     if project_id.trim().is_empty() {
         return Err("projectId must not be empty".into());
     }
@@ -677,6 +803,19 @@ async fn list_annotations(
         .collect::<Vec<_>>();
     annotations.sort_by(|left, right| right.captured_at_utc.cmp(&left.captured_at_utc));
     annotations.truncate(limit.max(1));
+    if let Ok(snapshot) = ymm4_client(connection)?.snapshot().await {
+        for item in &mut annotations {
+            if let Ok(capture_id) = parse_capture_id(&item.annotation_id)
+                && let Some(pin) = find_pin_item(&snapshot, capture_id)
+            {
+                item.pin_entity_id = Some(pin.entity_id.clone());
+                item.pin_realization_id = pin.realization_id.map(|id| id.to_string());
+                item.pin_frame = Some(pin.frame);
+                item.pin_layer = Some(pin.layer);
+                item.pin_length = Some(pin.length);
+            }
+        }
+    }
     Ok(AnnotationList {
         project_id,
         source_fingerprint,
@@ -745,6 +884,11 @@ fn project_list_item(
         promotion_task_id,
         promotion_plan_digest,
         promotion_base_revision,
+        pin_entity_id: None,
+        pin_realization_id: None,
+        pin_frame: None,
+        pin_layer: None,
+        pin_length: None,
     }
 }
 
@@ -997,6 +1141,176 @@ async fn lifecycle_annotation(
 }
 
 #[derive(Debug)]
+struct PinRequest {
+    capture: String,
+    layer: i32,
+    stage: bool,
+    task: Option<PathBuf>,
+    annotation_root: PathBuf,
+    project_id: Option<String>,
+    connection: Ymm4Connection,
+    state_root: PathBuf,
+}
+
+async fn pin_annotation(request: PinRequest) -> Result<PromoteReport, Box<dyn std::error::Error>> {
+    let (project_id, _) =
+        resolve_project_scope(request.project_id, None, request.connection.clone()).await?;
+    let store = AnnotationStore::open_scoped(&request.annotation_root, &project_id)?;
+    let capture_id = parse_capture_id(&request.capture)?;
+    let projection = store.capture(capture_id)?;
+    let interpretation_digest = projection
+        .interpretation
+        .as_ref()
+        .ok_or("capture has no interpretation")?
+        .interpretation_digest
+        .clone();
+    if !request.stage {
+        let operations = pin_promotion_operations(&projection, request.layer)?;
+        return Ok(PromoteReport {
+            capture_id: capture_id.0.to_string(),
+            interpretation_digest,
+            operations,
+            staged: None,
+        });
+    }
+    let client = ymm4_client(request.connection)?;
+    let snapshot = client.snapshot().await?;
+    let project_store =
+        DurableProjectStore::open_scoped(&request.state_root, &snapshot.project_id)?;
+    let staged = stage_pin_promotion(
+        &store,
+        &project_store,
+        &client,
+        snapshot,
+        capture_id,
+        request.layer,
+    )
+    .await?;
+    let task_file = request.task.unwrap_or_else(|| {
+        request
+            .annotation_root
+            .join(&project_id)
+            .join("promotions")
+            .join(format!("{}-pin.task.json", capture_id.0))
+    });
+    save_json(&task_file, &staged.task)?;
+    Ok(PromoteReport {
+        capture_id: capture_id.0.to_string(),
+        interpretation_digest,
+        operations: staged.operations,
+        staged: Some(PromoteStagedReport {
+            plan_digest: staged.plan_digest,
+            operation_id: staged.task.operation_id.to_string(),
+            patch_id: staged.task.patch.id.0.to_string(),
+            base_revision: staged.task.patch.base.0,
+            task_file,
+            promotion_status: "staged",
+        }),
+    })
+}
+
+#[derive(Debug)]
+struct UnpinRequest {
+    capture: String,
+    entity_id: Option<String>,
+    realization_id: Option<String>,
+    frame: Option<i32>,
+    layer: Option<i32>,
+    length: Option<i32>,
+    stage: bool,
+    task: Option<PathBuf>,
+    annotation_root: PathBuf,
+    project_id: Option<String>,
+    connection: Ymm4Connection,
+    state_root: PathBuf,
+}
+
+async fn unpin_annotation(
+    request: UnpinRequest,
+) -> Result<PromoteReport, Box<dyn std::error::Error>> {
+    let (project_id, _) =
+        resolve_project_scope(request.project_id, None, request.connection.clone()).await?;
+    let store = AnnotationStore::open_scoped(&request.annotation_root, &project_id)?;
+    let capture_id = parse_capture_id(&request.capture)?;
+    let projection = store.capture(capture_id)?;
+    let interpretation_digest = projection
+        .interpretation
+        .as_ref()
+        .ok_or("capture has no interpretation")?
+        .interpretation_digest
+        .clone();
+    if request.stage {
+        let client = ymm4_client(request.connection)?;
+        let snapshot = client.snapshot().await?;
+        let project_store =
+            DurableProjectStore::open_scoped(&request.state_root, &snapshot.project_id)?;
+        let staged =
+            stage_unpin_promotion(&store, &project_store, &client, snapshot, capture_id).await?;
+        let task_file = request.task.unwrap_or_else(|| {
+            request
+                .annotation_root
+                .join(&project_id)
+                .join("promotions")
+                .join(format!("{}-unpin.task.json", capture_id.0))
+        });
+        save_json(&task_file, &staged.task)?;
+        return Ok(PromoteReport {
+            capture_id: capture_id.0.to_string(),
+            interpretation_digest,
+            operations: staged.operations,
+            staged: Some(PromoteStagedReport {
+                plan_digest: staged.plan_digest,
+                operation_id: staged.task.operation_id.to_string(),
+                patch_id: staged.task.patch.id.0.to_string(),
+                base_revision: staged.task.patch.base.0,
+                task_file,
+                promotion_status: "staged",
+            }),
+        });
+    }
+    let client = ymm4_client(request.connection)?;
+    let snapshot = client.snapshot().await?;
+    let pin = find_pin_item(&snapshot, capture_id);
+    let entity_id = request
+        .entity_id
+        .or_else(|| pin.map(|item| item.entity_id.clone()))
+        .ok_or("unpin requires a live pin or --entity-id")?;
+    let realization_id = request
+        .realization_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()?
+        .or_else(|| pin.and_then(|item| item.realization_id))
+        .ok_or("unpin requires a live pin or --realization-id")?;
+    let frame = request
+        .frame
+        .or_else(|| pin.map(|item| item.frame))
+        .ok_or("unpin requires a live pin or --frame")?;
+    let layer = request
+        .layer
+        .or_else(|| pin.map(|item| item.layer))
+        .ok_or("unpin requires a live pin or --layer")?;
+    let length = request
+        .length
+        .or_else(|| pin.map(|item| item.length))
+        .ok_or("unpin requires a live pin or --length")?;
+    let operations = unpin_promotion_operations(
+        &projection,
+        &entity_id,
+        realization_id,
+        frame,
+        layer,
+        length,
+    )?;
+    Ok(PromoteReport {
+        capture_id: capture_id.0.to_string(),
+        interpretation_digest,
+        operations,
+        staged: None,
+    })
+}
+
+#[derive(Debug)]
 struct PromoteRequest {
     capture: String,
     character_name: String,
@@ -1034,12 +1348,8 @@ struct PromoteReport {
 async fn promote_annotation(
     request: PromoteRequest,
 ) -> Result<PromoteReport, Box<dyn std::error::Error>> {
-    let (project_id, _) = resolve_project_scope(
-        request.project_id,
-        None,
-        request.connection.clone(),
-    )
-    .await?;
+    let (project_id, _) =
+        resolve_project_scope(request.project_id, None, request.connection.clone()).await?;
     let store = AnnotationStore::open_scoped(&request.annotation_root, &project_id)?;
     let capture_id = parse_capture_id(&request.capture)?;
     let projection = store.capture(capture_id)?;
@@ -1065,7 +1375,8 @@ async fn promote_annotation(
     }
     let client = ymm4_client(request.connection)?;
     let snapshot = client.snapshot().await?;
-    let project_store = DurableProjectStore::open_scoped(&request.state_root, &snapshot.project_id)?;
+    let project_store =
+        DurableProjectStore::open_scoped(&request.state_root, &snapshot.project_id)?;
     let staged = stage_narration_promotion(
         &store,
         &project_store,

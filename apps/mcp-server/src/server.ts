@@ -1970,9 +1970,17 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     {
       title: "Review voice annotations",
       description:
-        "List, correct, dismiss, interpret, or preview-promote captured voice notes. App-only; recording stays local.",
+        "List, correct, dismiss, interpret, preview-promote, pin, or unpin captured voice notes. App-only; recording stays local.",
       inputSchema: {
-        action: z.enum(["list", "correct", "dismiss", "interpret", "promote"]),
+        action: z.enum([
+          "list",
+          "correct",
+          "dismiss",
+          "interpret",
+          "promote",
+          "pin",
+          "unpin",
+        ]),
         annotationId: z.string().min(1).optional(),
         text: z.string().min(1).optional(),
         reason: z.string().optional(),
@@ -2023,6 +2031,45 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           return {
             content: [{ type: "text" as const, text: "Interpretation attached." }],
             structuredContent: { result },
+          };
+        }
+        if (input.action === "pin") {
+          const result = (await ymm4.pinAnnotation({
+            annotationId: input.annotationId,
+            layer: input.layer ?? 90,
+          })) as { staged?: unknown };
+          const envelope = result.staged
+            ? rememberStagedTimelineEdit(facadeRegistry, result.staged)
+            : undefined;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: envelope
+                  ? `Pin staged as timeline_edit ${envelope.taskId}. Execute with the exact planDigest; YMM4 is unchanged.`
+                  : "Pin operations are ready for timeline_edit with sourceEvidence.",
+              },
+            ],
+            structuredContent: { result, task: envelope ?? null },
+          };
+        }
+        if (input.action === "unpin") {
+          const result = (await ymm4.unpinAnnotation({
+            annotationId: input.annotationId,
+          })) as { staged?: unknown };
+          const envelope = result.staged
+            ? rememberStagedTimelineEdit(facadeRegistry, result.staged)
+            : undefined;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: envelope
+                  ? `Unpin staged as timeline_edit ${envelope.taskId}. Execute with the exact planDigest; YMM4 is unchanged.`
+                  : "Unpin operations are ready for timeline_edit with sourceEvidence.",
+              },
+            ],
+            structuredContent: { result, task: envelope ?? null },
           };
         }
         if (!input.characterName) {

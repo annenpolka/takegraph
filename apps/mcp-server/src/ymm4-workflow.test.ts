@@ -57,6 +57,8 @@ else if (args[0] === "ymm4" && args[1] === "scene-decide") print({ receipt: { st
 else if (args[0] === "ymm4" && args[1] === "scene-status") print({ receipt: { status: "accepted", captures: [] }, stale: false });
 else if (args[0] === "ymm4" && args[1] === "save") print({ action: "save", success: true });
 else if (args[0] === "annotation" && args[1] === "promote") print({ captureId: value("--capture"), operations: [{ type: "native_voice_create", cue: { entityId: "ann-n0", displayText: "Compression", characterName: value("--character-name"), frame: 10, layer: Number(value("--layer") || 2), maxLength: 300 }, sourceEvidence: { annotationId: value("--capture"), captureAudioSha256: "sha256:" + "a".repeat(64), transcriptDigest: "sha256:" + "b".repeat(64), interpretationDigest: "sha256:" + "c".repeat(64) } }] });
+else if (args[0] === "annotation" && args[1] === "pin") print({ captureId: value("--capture"), operations: [{ type: "annotation_marker_create", marker: { entityId: "ann-aaaaaaaa-pin", annotationId: value("--capture"), realizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", frame: 12, layer: Number(value("--layer") || 90), length: 30, label: "メモ" }, sourceEvidence: { annotationId: value("--capture"), captureAudioSha256: "sha256:" + "a".repeat(64), transcriptDigest: "sha256:" + "b".repeat(64), interpretationDigest: "sha256:" + "c".repeat(64) } }] });
+else if (args[0] === "annotation" && args[1] === "unpin") print({ captureId: value("--capture"), operations: [{ type: "annotation_marker_delete", marker: { entityId: "ann-aaaaaaaa-pin", annotationId: value("--capture"), realizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", frame: 12, layer: 90, length: 30, label: "メモ" }, sourceEvidence: { annotationId: value("--capture"), captureAudioSha256: "sha256:" + "a".repeat(64), transcriptDigest: "sha256:" + "b".repeat(64), interpretationDigest: "sha256:" + "c".repeat(64) } }] });
 else if (args[0] === "annotation" && args[1] === "promotion-stage") print({ captureId: value("--capture"), status: "staged" });
 else if (args[0] === "annotation" && args[1] === "promotion-commit") { const record = { captureId: value("--capture"), taskId: value("--task-id"), committedRevision: value("--committed-revision"), receiptDigest: value("--receipt-digest") }; try { fs.mkdirSync(value("--annotation-root"), { recursive: true }); fs.writeFileSync(value("--annotation-root") + "/last-promotion-commit.json", JSON.stringify(record)); } catch {} print({ captureId: value("--capture"), status: "committed" }); }
 else { process.stderr.write("unexpected args: " + args.join(" ")); process.exit(2); }
@@ -603,6 +605,53 @@ test("annotation promote stages a timeline_edit with sourceEvidence", async (t) 
   ) as { captureId?: string; taskId?: string };
   assert.equal(promotion.captureId, captureId);
   assert.equal(promotion.taskId, "55555555-5555-4555-8555-555555555555");
+});
+
+test("annotation pin stages a timeline_edit annotation_marker_create with sourceEvidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "takegraph-annotation-pin-"));
+  t.after(async () => fs.rm(root, { recursive: true, force: true }));
+  const script = path.join(root, "fake-cli.mjs");
+  const stateDirectory = path.join(root, "state");
+  await fs.writeFile(script, fakeCli, "utf8");
+  const workflow = new Ymm4Workflow({
+    executable: process.execPath,
+    executableArgs: [script],
+    stateDirectory,
+    artifactDirectory: path.join(root, "artifacts"),
+    projectStateRoot: path.join(root, "project-store"),
+    annotationStoreRoot: path.join(root, "annotation-store"),
+  });
+  const captureId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const pinned = (await workflow.pinAnnotation({
+    annotationId: captureId,
+    layer: 90,
+  })) as {
+    staged?: { handle?: string; planDigest?: string };
+    operations?: Array<{
+      type?: string;
+      sourceEvidence?: { annotationId?: string };
+    }>;
+  };
+  assert.equal(pinned.operations?.[0]?.type, "annotation_marker_create");
+  assert.equal(pinned.operations?.[0]?.sourceEvidence?.annotationId, captureId);
+  assert.equal(typeof pinned.staged?.handle, "string");
+  const manifest = JSON.parse(
+    await fs.readFile(
+      path.join(stateDirectory, `${pinned.staged?.handle}.timeline-edit.manifest.json`),
+      "utf8",
+    ),
+  ) as {
+    operations: Array<{ type?: string; sourceEvidence?: { annotationId?: string } }>;
+  };
+  assert.equal(manifest.operations[0]?.type, "annotation_marker_create");
+  assert.equal(manifest.operations[0]?.sourceEvidence?.annotationId, captureId);
+
+  const unpinned = (await workflow.unpinAnnotation({
+    annotationId: captureId,
+  })) as {
+    operations?: Array<{ type?: string }>;
+  };
+  assert.equal(unpinned.operations?.[0]?.type, "annotation_marker_delete");
 });
 
 test("YMM4 workflow rejects an active-project switch after reading canonical head", async (t) => {

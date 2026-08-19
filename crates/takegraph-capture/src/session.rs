@@ -1156,11 +1156,28 @@ mod tests {
 
         let listed = host.list(20).await.unwrap();
         assert_eq!(listed.len(), 1);
-        assert!(host.list_for_project("project-b", 20).await.unwrap().is_empty());
-        assert_eq!(host.list_for_project("project-a", 20).await.unwrap().len(), 1);
-        let before = fs::read_dir(&root).map(|entries| entries.count()).unwrap_or(0);
-        assert!(host.list_for_project("project-missing", 20).await.unwrap().is_empty());
-        let after = fs::read_dir(&root).map(|entries| entries.count()).unwrap_or(0);
+        assert!(
+            host.list_for_project("project-b", 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            host.list_for_project("project-a", 20).await.unwrap().len(),
+            1
+        );
+        let before = fs::read_dir(&root)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert!(
+            host.list_for_project("project-missing", 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let after = fs::read_dir(&root)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
         assert_eq!(before, after);
         let reopened = AnnotationStore::open_scoped(&root, "project-a").unwrap();
         assert_eq!(reopened.capture(id).unwrap().capture.id, id);

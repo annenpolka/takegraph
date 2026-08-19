@@ -472,11 +472,8 @@ mod tests {
                 "-0.8",
             ]
         );
-        let overridden = merge_whisper_decoder_args(vec![
-            "-nth".into(),
-            "0.2".into(),
-            "--suppress-nst".into(),
-        ]);
+        let overridden =
+            merge_whisper_decoder_args(vec!["-nth".into(), "0.2".into(), "--suppress-nst".into()]);
         assert_eq!(
             overridden,
             vec![
@@ -500,7 +497,10 @@ mod tests {
         samples.extend(std::iter::repeat_n(0, rate as usize * 2));
         let trimmed = trim_pcm_for_asr(&samples, rate);
         assert_eq!(trimmed.len(), pad + 3_200 + pad);
-        assert_eq!(&trimmed[pad..pad + 3_200], &samples[rate as usize..rate as usize + 3_200]);
+        assert_eq!(
+            &trimmed[pad..pad + 3_200],
+            &samples[rate as usize..rate as usize + 3_200]
+        );
 
         let quiet = vec![0i16; 8_000];
         assert_eq!(trim_pcm_for_asr(&quiet, rate).len(), 8_000);

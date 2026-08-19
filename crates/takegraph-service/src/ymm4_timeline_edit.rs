@@ -2,16 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 use takegraph_core::{
-    CapabilityDependency, ChangeBudget, Patch, PatchError, PatchStatus, PlanWarning, RevisionId,
-    SourceEvidenceRef, TARGET_PLAN_CANONICAL_VERSION, TIMELINE_EDIT_MAX_OPERATIONS,
+    AnnotationId, CapabilityDependency, ChangeBudget, Patch, PatchError, PatchStatus, PlanWarning,
+    PlannedAction, PlannedAnnotationMarker, RevisionId, ScopeFingerprints, SourceEvidenceRef,
+    TARGET_PLAN_CANONICAL_VERSION, TIMELINE_EDIT_MAX_OPERATIONS,
     TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TargetPlan, TimelineEditOperation, TimelineEditPlan,
     approval_digests_match, canonical_sha256,
 };
 use takegraph_node::{
-    CapabilityRequirement, ManagedUtterance, StructuredYmm4Capabilities, Ymm4BridgeClient,
-    Ymm4Error, Ymm4ManagedItem, Ymm4NativeVoiceCue, Ymm4OperationStatus, Ymm4ProjectSnapshot,
-    Ymm4TimelineEditApplyRequest, Ymm4TimelineEditReceipt, Ymm4TimelineEditValidation,
-    Ymm4TimelineEditValidationRequest,
+    CapabilityRequirement, ManagedItemKind, ManagedUtterance, StructuredYmm4Capabilities,
+    Ymm4AnnotationMarkerCue, Ymm4BridgeClient, Ymm4Error, Ymm4ManagedItem, Ymm4NativeVoiceCue,
+    Ymm4OperationStatus, Ymm4ProjectSnapshot, Ymm4TimelineEditApplyRequest,
+    Ymm4TimelineEditReceipt, Ymm4TimelineEditValidation, Ymm4TimelineEditValidationRequest,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -37,6 +38,16 @@ pub enum TimelineEditStageOperation {
     },
     NativeVoiceCreate {
         cue: Ymm4NativeVoiceCue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_evidence: Option<SourceEvidenceRef>,
+    },
+    AnnotationMarkerCreate {
+        marker: Ymm4AnnotationMarkerCue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_evidence: Option<SourceEvidenceRef>,
+    },
+    AnnotationMarkerDelete {
+        marker: Ymm4AnnotationMarkerCue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_evidence: Option<SourceEvidenceRef>,
     },
@@ -124,6 +135,37 @@ fn build_timeline_edit_plan(
                     capabilities,
                 )?
             }
+            TimelineEditStageOperation::AnnotationMarkerCreate {
+                marker,
+                source_evidence: evidence,
+            }
+            | TimelineEditStageOperation::AnnotationMarkerDelete {
+                marker,
+                source_evidence: evidence,
+            } => {
+                if let Some(evidence) = evidence {
+                    source_evidence.push(evidence.clone());
+                }
+                if marker.project_id != target.project_id {
+                    return Err(Ymm4TimelineEditError::InvalidManifest(
+                        "annotation marker projectId must match the live target".into(),
+                    ));
+                }
+                let action = match input {
+                    TimelineEditStageOperation::AnnotationMarkerDelete { .. } => {
+                        PlannedAction::Delete
+                    }
+                    _ => PlannedAction::Create,
+                };
+                operations.push(TimelineEditOperation::AnnotationMarker {
+                    marker: Box::new(plan_annotation_marker(
+                        marker,
+                        action,
+                        timeline_dependency.clone(),
+                    )?),
+                });
+                continue;
+            }
         };
         if target_identity.is_none() {
             target_identity = Some(child.target.clone());
@@ -137,6 +179,11 @@ fn build_timeline_edit_plan(
             .push(timeline_dependency.clone());
         warnings.extend(child.warnings);
         operations.push(TimelineEditOperation::ManagedCue { cue: Box::new(cue) });
+    }
+    if target_identity.is_none() {
+        let identity = crate::ymm4_target_plan::ymm4_target_identity(capabilities, target);
+        expected_scope = Some(annotation_marker_scope(target, &identity)?);
+        target_identity = Some(identity);
     }
     warnings.push(PlanWarning {
         code: "atomic_timeline_edit".into(),
@@ -162,6 +209,67 @@ fn build_timeline_edit_plan(
     plan.validate()
         .map_err(|error| Ymm4TimelineEditError::InvalidPlan(error.to_string()))?;
     Ok(plan)
+}
+
+fn plan_annotation_marker(
+    marker: &Ymm4AnnotationMarkerCue,
+    action: PlannedAction,
+    timeline_dependency: CapabilityDependency,
+) -> Result<PlannedAnnotationMarker, Ymm4TimelineEditError> {
+    if marker.entity_id.trim().is_empty() {
+        return Err(Ymm4TimelineEditError::InvalidManifest(
+            "annotation marker entityId must not be empty".into(),
+        ));
+    }
+    if marker.project_id.trim().is_empty() {
+        return Err(Ymm4TimelineEditError::InvalidManifest(
+            "annotation marker projectId must not be empty".into(),
+        ));
+    }
+    if marker.annotation_id.is_nil() || marker.realization_id.is_nil() {
+        return Err(Ymm4TimelineEditError::InvalidManifest(
+            "annotation marker identities must not be nil".into(),
+        ));
+    }
+    if marker.frame < 0 || marker.layer < 0 || marker.length <= 0 {
+        return Err(Ymm4TimelineEditError::InvalidManifest(
+            "annotation marker frame/layer/length is illegal".into(),
+        ));
+    }
+    let label = marker.label.trim();
+    let label = if label.is_empty() { "メモ" } else { label };
+    Ok(PlannedAnnotationMarker {
+        realization_id: marker.realization_id,
+        action,
+        entity_id: marker.entity_id.clone(),
+        annotation_id: AnnotationId(marker.annotation_id),
+        project_id: marker.project_id.clone(),
+        frame: marker.frame,
+        layer: marker.layer,
+        length: marker.length,
+        label: label.to_owned(),
+        capability_dependencies: vec![timeline_dependency],
+    })
+}
+
+fn annotation_marker_scope(
+    target: &Ymm4ProjectSnapshot,
+    identity: &takegraph_core::TargetIdentity,
+) -> Result<ScopeFingerprints, Ymm4TimelineEditError> {
+    Ok(ScopeFingerprints {
+        target_identity_digest: canonical_sha256("takegraph-ymm4-target-identity", identity)?,
+        managed_state_digest: canonical_sha256(
+            "takegraph-ymm4-managed-state",
+            &target.managed_items,
+        )?,
+        conflict_scope_digest: canonical_sha256(
+            "takegraph-ymm4-conflict-scope-v1-whole-scene",
+            &serde_json::json!({
+                "fingerprint": target.fingerprint,
+                "unmanagedContextCount": target.unmanaged_context_count,
+            }),
+        )?,
+    })
 }
 
 /// Persisted task envelope. Apply-specific bridge fields are added only after
@@ -428,6 +536,9 @@ impl Ymm4TimelineEditTask {
             .iter()
             .flat_map(|operation| match operation {
                 TimelineEditOperation::ManagedCue { cue } => cue.capability_dependencies.as_slice(),
+                TimelineEditOperation::AnnotationMarker { marker } => {
+                    marker.capability_dependencies.as_slice()
+                }
                 TimelineEditOperation::NativeExtension { operation, .. } => {
                     operation.capability_dependencies.as_slice()
                 }
@@ -479,32 +590,47 @@ impl Ymm4TimelineEditTask {
     }
 
     fn verify_items(&self, items: &[Ymm4ManagedItem]) -> Result<(), Ymm4TimelineEditError> {
-        let cues = self
-            .timeline_edit_plan
-            .operations
-            .iter()
-            .map(|operation| match operation {
-                TimelineEditOperation::ManagedCue { cue } => Ok(cue.as_ref().clone()),
-                TimelineEditOperation::NativeExtension { .. } => {
-                    Err(Ymm4TimelineEditError::Unsupported(
-                        "native extensions are not enabled in aggregate receipts".into(),
-                    ))
+        let mut cues = Vec::new();
+        let mut markers = Vec::new();
+        for operation in &self.timeline_edit_plan.operations {
+            match operation {
+                TimelineEditOperation::ManagedCue { cue } => cues.push(cue.as_ref().clone()),
+                TimelineEditOperation::AnnotationMarker { marker } => {
+                    markers.push(marker.as_ref().clone());
                 }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                TimelineEditOperation::NativeExtension { .. } => {
+                    return Err(Ymm4TimelineEditError::Unsupported(
+                        "native extensions are not enabled in aggregate receipts".into(),
+                    ));
+                }
+            }
+        }
         let expected_physical = cues
             .iter()
             .map(|cue| match cue.strategy {
                 takegraph_core::RealizationStrategy::PortableAudioCaption => 2,
                 takegraph_core::RealizationStrategy::Ymm4NativeVoice => 1,
             })
-            .sum::<usize>();
+            .sum::<usize>()
+            + markers
+                .iter()
+                .filter(|marker| marker.action == PlannedAction::Create)
+                .count();
         if items.len() != expected_physical {
             return Err(Ymm4TimelineEditError::VerifyMismatch(format!(
                 "read-back contains {} physical items, expected {expected_physical}",
                 items.len()
             )));
         }
+        verify_annotation_markers(&markers, items)?;
+        if cues.is_empty() {
+            return Ok(());
+        }
+        let voice_items = items
+            .iter()
+            .filter(|item| item.kind != ManagedItemKind::Annotation)
+            .cloned()
+            .collect::<Vec<_>>();
         let target_plan = TargetPlan {
             canonical_version: TARGET_PLAN_CANONICAL_VERSION,
             operation_id: self.operation_id,
@@ -516,7 +642,7 @@ impl Ymm4TimelineEditTask {
             cues,
             warnings: self.timeline_edit_plan.warnings.clone(),
         };
-        crate::normalize_realizations(&target_plan, items)
+        crate::normalize_realizations(&target_plan, &voice_items)
             .map(|_| ())
             .map_err(|error| Ymm4TimelineEditError::VerifyMismatch(error.to_string()))
     }
@@ -525,19 +651,25 @@ impl Ymm4TimelineEditTask {
         let relevant = items
             .iter()
             .filter(|item| {
-                self.timeline_edit_plan.operations.iter().any(|operation| {
-                    let TimelineEditOperation::ManagedCue { cue } = operation else {
-                        return false;
-                    };
-                    match cue.strategy {
-                        takegraph_core::RealizationStrategy::PortableAudioCaption => {
-                            item.entity_id == cue.intent.entity_id
+                self.timeline_edit_plan
+                    .operations
+                    .iter()
+                    .any(|operation| match operation {
+                        TimelineEditOperation::ManagedCue { cue } => match cue.strategy {
+                            takegraph_core::RealizationStrategy::PortableAudioCaption => {
+                                item.entity_id == cue.intent.entity_id
+                            }
+                            takegraph_core::RealizationStrategy::Ymm4NativeVoice => {
+                                item.realization_id == Some(cue.realization_id)
+                            }
+                        },
+                        TimelineEditOperation::AnnotationMarker { marker } => {
+                            item.kind == ManagedItemKind::Annotation
+                                && (item.entity_id == marker.entity_id
+                                    || item.realization_id == Some(marker.realization_id))
                         }
-                        takegraph_core::RealizationStrategy::Ymm4NativeVoice => {
-                            item.realization_id == Some(cue.realization_id)
-                        }
-                    }
-                })
+                        TimelineEditOperation::NativeExtension { .. } => false,
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -590,6 +722,9 @@ impl Ymm4TimelineEditTask {
                 .iter()
                 .filter_map(|operation| match operation {
                     TimelineEditOperation::ManagedCue { cue } => Some(cue.intent.entity_id.clone()),
+                    TimelineEditOperation::AnnotationMarker { marker } => {
+                        Some(marker.entity_id.clone())
+                    }
                     TimelineEditOperation::NativeExtension { .. } => None,
                 });
             let update = crate::project_store::VerifiedManagedStateUpdate::
@@ -683,6 +818,53 @@ impl Ymm4TimelineEditTask {
     }
 }
 
+fn verify_annotation_markers(
+    markers: &[PlannedAnnotationMarker],
+    items: &[Ymm4ManagedItem],
+) -> Result<(), Ymm4TimelineEditError> {
+    for marker in markers {
+        let found = items.iter().find(|item| {
+            item.kind == ManagedItemKind::Annotation
+                && item.entity_id == marker.entity_id
+                && item.realization_id == Some(marker.realization_id)
+        });
+        match marker.action {
+            PlannedAction::Create => {
+                let Some(item) = found else {
+                    return Err(Ymm4TimelineEditError::VerifyMismatch(format!(
+                        "annotation marker {} is missing after create",
+                        marker.entity_id
+                    )));
+                };
+                if item.frame != marker.frame
+                    || item.layer != marker.layer
+                    || item.length != marker.length
+                    || item.text.as_deref() != Some(marker.label.as_str())
+                {
+                    return Err(Ymm4TimelineEditError::VerifyMismatch(format!(
+                        "annotation marker {} read-back does not match the approved pin",
+                        marker.entity_id
+                    )));
+                }
+            }
+            PlannedAction::Delete => {
+                if found.is_some() {
+                    return Err(Ymm4TimelineEditError::VerifyMismatch(format!(
+                        "annotation marker {} is still present after delete",
+                        marker.entity_id
+                    )));
+                }
+            }
+            PlannedAction::Update => {
+                return Err(Ymm4TimelineEditError::Unsupported(
+                    "annotation marker update is not supported".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_bridge_validation(
     plan: &TimelineEditPlan,
     target: &Ymm4ProjectSnapshot,
@@ -693,29 +875,47 @@ fn validate_bridge_validation(
         .map_err(|error| Ymm4TimelineEditError::InvalidPlan(error.to_string()))?;
     let mut portable = 0;
     let mut native = 0;
+    let mut markers = 0;
     let mut create = 0;
     let mut update = 0;
     let mut delete = 0;
+    let mut marker_creates = 0;
     for operation in &plan.operations {
-        let TimelineEditOperation::ManagedCue { cue } = operation else {
-            return Err(Ymm4TimelineEditError::Unsupported(
-                "native extensions are not enabled by this bridge profile".into(),
-            ));
-        };
-        match cue.strategy {
-            takegraph_core::RealizationStrategy::PortableAudioCaption => portable += 1,
-            takegraph_core::RealizationStrategy::Ymm4NativeVoice => native += 1,
-        }
-        match cue.action {
-            takegraph_core::PlannedAction::Create => create += 1,
-            takegraph_core::PlannedAction::Update => update += 1,
-            takegraph_core::PlannedAction::Delete => delete += 1,
+        match operation {
+            TimelineEditOperation::ManagedCue { cue } => {
+                match cue.strategy {
+                    takegraph_core::RealizationStrategy::PortableAudioCaption => portable += 1,
+                    takegraph_core::RealizationStrategy::Ymm4NativeVoice => native += 1,
+                }
+                match cue.action {
+                    takegraph_core::PlannedAction::Create => create += 1,
+                    takegraph_core::PlannedAction::Update => update += 1,
+                    takegraph_core::PlannedAction::Delete => delete += 1,
+                }
+            }
+            TimelineEditOperation::AnnotationMarker { marker } => {
+                markers += 1;
+                match marker.action {
+                    takegraph_core::PlannedAction::Create => {
+                        create += 1;
+                        marker_creates += 1;
+                    }
+                    takegraph_core::PlannedAction::Update => update += 1,
+                    takegraph_core::PlannedAction::Delete => delete += 1,
+                }
+            }
+            TimelineEditOperation::NativeExtension { .. } => {
+                return Err(Ymm4TimelineEditError::Unsupported(
+                    "native extensions are not enabled by this bridge profile".into(),
+                ));
+            }
         }
     }
     if validation.operation_id != plan.operation_id
         || validation.plan_digest != plan_digest
         || validation.fingerprint != target.fingerprint
-        || validation.strategy_counts.len() != usize::from(portable > 0) + usize::from(native > 0)
+        || validation.strategy_counts.len()
+            != usize::from(portable > 0) + usize::from(native > 0) + usize::from(markers > 0)
         || validation
             .strategy_counts
             .get("portable_pair")
@@ -728,10 +928,16 @@ fn validate_bridge_validation(
             .copied()
             .unwrap_or_default()
             != native
+        || validation
+            .strategy_counts
+            .get("annotation_marker")
+            .copied()
+            .unwrap_or_default()
+            != markers
         || validation.create_count != create
         || validation.update_count != update
         || validation.delete_count != delete
-        || validation.physical_item_count != portable * 2 + native
+        || validation.physical_item_count != portable * 2 + native + marker_creates
     {
         return Err(Ymm4TimelineEditError::InvalidPlan(
             "bridge validation is not bound to the complete ordered plan".into(),
@@ -915,6 +1121,22 @@ mod tests {
         }
     }
 
+    fn pin(entity: &str) -> TimelineEditStageOperation {
+        TimelineEditStageOperation::AnnotationMarkerCreate {
+            source_evidence: None,
+            marker: Ymm4AnnotationMarkerCue {
+                realization_id: Uuid::from_u128(33),
+                entity_id: entity.into(),
+                annotation_id: Uuid::from_u128(7),
+                project_id: "project".into(),
+                frame: 12,
+                layer: 90,
+                length: 30,
+                label: "メモ".into(),
+            },
+        }
+    }
+
     #[test]
     fn builder_preserves_mixed_caller_order() {
         let manifest = TimelineEditStageManifest {
@@ -938,9 +1160,57 @@ mod tests {
                     .capability_dependencies
                     .iter()
                     .any(|dependency| dependency.feature == "timelineEdit.apply"),
+                TimelineEditOperation::AnnotationMarker { marker } => marker
+                    .capability_dependencies
+                    .iter()
+                    .any(|dependency| dependency.feature == "timelineEdit.apply"),
                 TimelineEditOperation::NativeExtension { .. } => false,
             }
         }));
+    }
+
+    #[test]
+    fn builder_accepts_annotation_marker_create() {
+        let plan = build_timeline_edit_plan(
+            RevisionId(7),
+            Uuid::from_u128(1),
+            &target(),
+            &TimelineEditStageManifest {
+                operations: vec![pin("ann-pin")],
+                max_changed_entities: None,
+            },
+            &capabilities(),
+        )
+        .unwrap();
+        assert_eq!(plan.operations.len(), 1);
+        assert_eq!(plan.operations[0].write_identity(), "entity:ann-pin");
+        let TimelineEditOperation::AnnotationMarker { marker } = &plan.operations[0] else {
+            panic!("expected annotation marker");
+        };
+        assert_eq!(marker.action, PlannedAction::Create);
+        assert_eq!(marker.layer, 90);
+        assert_eq!(marker.label, "メモ");
+    }
+
+    #[test]
+    fn builder_refuses_annotation_marker_for_another_project() {
+        let mut foreign = pin("ann-pin");
+        let TimelineEditStageOperation::AnnotationMarkerCreate { marker, .. } = &mut foreign else {
+            panic!("expected pin");
+        };
+        marker.project_id = "other".into();
+        let error = build_timeline_edit_plan(
+            RevisionId(7),
+            Uuid::from_u128(1),
+            &target(),
+            &TimelineEditStageManifest {
+                operations: vec![foreign],
+                max_changed_entities: None,
+            },
+            &capabilities(),
+        )
+        .expect_err("foreign project");
+        assert!(matches!(error, Ymm4TimelineEditError::InvalidManifest(_)));
     }
 
     #[test]
@@ -1475,9 +1745,12 @@ mod tests {
         let annotation_store =
             crate::annotation_store::AnnotationStore::open_scoped(&root.join("ann"), "project")
                 .unwrap();
-        let project_store =
-            crate::DurableProjectStore::open_scoped_or_bootstrap(&root.join("proj"), "project", RevisionId(0))
-                .unwrap();
+        let project_store = crate::DurableProjectStore::open_scoped_or_bootstrap(
+            &root.join("proj"),
+            "project",
+            RevisionId(0),
+        )
+        .unwrap();
         let capture_id = takegraph_core::AnnotationId::new();
         annotation_store
             .import_capture(takegraph_core::AnnotationCapture {
@@ -1557,7 +1830,11 @@ mod tests {
         assert_eq!(staged.operations.len(), 1);
         assert!(staged.plan_digest.starts_with("sha256:"));
         assert_eq!(project_store.head().unwrap(), RevisionId(0));
-        let promotion = annotation_store.capture(capture_id).unwrap().promotion.unwrap();
+        let promotion = annotation_store
+            .capture(capture_id)
+            .unwrap()
+            .promotion
+            .unwrap();
         assert_eq!(
             promotion.status,
             crate::annotation_store::PromotionStatus::Staged
@@ -1577,7 +1854,12 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         assert_eq!(
-            annotation_store.capture(capture_id).unwrap().promotion.unwrap().status,
+            annotation_store
+                .capture(capture_id)
+                .unwrap()
+                .promotion
+                .unwrap()
+                .status,
             crate::annotation_store::PromotionStatus::Committed
         );
         crate::commit_promotions_from_plan(

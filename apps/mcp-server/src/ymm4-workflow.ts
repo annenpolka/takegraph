@@ -332,9 +332,31 @@ export interface StageNativeExtensionInput {
   maxChangedEntities?: number;
 }
 
+export interface StageAnnotationMarkerCreateInput {
+  entityId: string;
+  annotationId: string;
+  frame: number;
+  layer: number;
+  length: number;
+  label?: string;
+  sourceEvidence?: SourceEvidenceInput;
+}
+
+export interface StageAnnotationMarkerDeleteInput {
+  entityId: string;
+  realizationId: string;
+  annotationId: string;
+  frame: number;
+  layer: number;
+  length: number;
+  sourceEvidence?: SourceEvidenceInput;
+}
+
 export type TimelineEditOperationInput =
   | ({ op: "portable_voice_create" } & StageYmm4Input)
-  | ({ op: "native_voice_create" } & StageNativeVoiceInput);
+  | ({ op: "native_voice_create" } & StageNativeVoiceInput)
+  | ({ op: "annotation_marker_create" } & StageAnnotationMarkerCreateInput)
+  | ({ op: "annotation_marker_delete" } & StageAnnotationMarkerDeleteInput);
 
 export interface StageTimelineEditInput {
   operations: TimelineEditOperationInput[];
@@ -343,10 +365,9 @@ export interface StageTimelineEditInput {
 
 function timelineEditOpsFromPromote(preview: {
   operations?: unknown;
-}): Extract<TimelineEditOperationInput, { op: "native_voice_create" }>[] {
+}): TimelineEditOperationInput[] {
   const operations = Array.isArray(preview.operations) ? preview.operations : [];
-  const mapped: Extract<TimelineEditOperationInput, { op: "native_voice_create" }>[] =
-    [];
+  const mapped: TimelineEditOperationInput[] = [];
   for (const item of operations) {
     if (!item || typeof item !== "object") continue;
     const row = item as {
@@ -354,6 +375,36 @@ function timelineEditOpsFromPromote(preview: {
       cue?: Record<string, unknown>;
       sourceEvidence?: SourceEvidenceInput;
     };
+    if (
+      row.type === "annotation_marker_create" ||
+      row.type === "annotation_marker_delete"
+    ) {
+      const marker = (item as { marker?: Record<string, unknown> }).marker ?? {};
+      if (row.type === "annotation_marker_delete") {
+        mapped.push({
+          op: "annotation_marker_delete",
+          entityId: String(marker.entityId ?? ""),
+          realizationId: String(marker.realizationId ?? ""),
+          annotationId: String(marker.annotationId ?? ""),
+          frame: Number(marker.frame),
+          layer: Number(marker.layer),
+          length: Number(marker.length),
+          sourceEvidence: row.sourceEvidence,
+        });
+        continue;
+      }
+      mapped.push({
+        op: "annotation_marker_create",
+        entityId: String(marker.entityId ?? ""),
+        annotationId: String(marker.annotationId ?? ""),
+        frame: Number(marker.frame),
+        layer: Number(marker.layer),
+        length: Number(marker.length),
+        label: typeof marker.label === "string" ? marker.label : undefined,
+        sourceEvidence: row.sourceEvidence,
+      });
+      continue;
+    }
     if (row.type !== "native_voice_create") continue;
     const cue = row.cue ?? {};
     mapped.push({
@@ -401,6 +452,20 @@ type PreparedTimelineEditOperation =
         frame: number;
         layer: number;
         maxLength: number;
+      };
+      sourceEvidence?: SourceEvidenceInput;
+    }
+  | {
+      type: "annotation_marker_create" | "annotation_marker_delete";
+      marker: {
+        realizationId: string;
+        entityId: string;
+        annotationId: string;
+        projectId: string;
+        frame: number;
+        layer: number;
+        length: number;
+        label: string;
       };
       sourceEvidence?: SourceEvidenceInput;
     };
@@ -758,6 +823,45 @@ export class Ymm4Workflow {
     return { ...preview, staged };
   }
 
+  async pinAnnotation(input: {
+    annotationId: string;
+    layer?: number;
+  }): Promise<unknown> {
+    const preview = (await this.runJson([
+      "annotation",
+      "pin",
+      "--capture",
+      input.annotationId,
+      "--layer",
+      String(input.layer ?? 90),
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ])) as { operations?: unknown };
+    const operations = timelineEditOpsFromPromote(preview);
+    if (operations.length === 0) {
+      throw new Error("capture cannot be pinned");
+    }
+    const staged = await this.stageTimelineEdit({ operations });
+    return { ...preview, staged };
+  }
+
+  async unpinAnnotation(input: { annotationId: string }): Promise<unknown> {
+    const preview = (await this.runJson([
+      "annotation",
+      "unpin",
+      "--capture",
+      input.annotationId,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ])) as { operations?: unknown };
+    const operations = timelineEditOpsFromPromote(preview);
+    if (operations.length === 0) {
+      throw new Error("capture has no pin to remove");
+    }
+    const staged = await this.stageTimelineEdit({ operations });
+    return { ...preview, staged };
+  }
+
   private async requireNamedProject(): Promise<Ymm4Snapshot> {
     const canonical = await this.readHead();
     const snapshot = (await this.runJson([
@@ -1083,6 +1187,38 @@ export class Ymm4Workflow {
       );
       const prepared = input.operations.map(
         (operation, index): PreparedTimelineEditOperation => {
+          if (operation.op === "annotation_marker_create") {
+            return {
+              type: "annotation_marker_create",
+              marker: {
+                realizationId: randomUUID(),
+                entityId: operation.entityId,
+                annotationId: operation.annotationId,
+                projectId: snapshot.projectId,
+                frame: operation.frame,
+                layer: operation.layer,
+                length: operation.length,
+                label: operation.label?.trim() || "メモ",
+              },
+              sourceEvidence: operation.sourceEvidence,
+            };
+          }
+          if (operation.op === "annotation_marker_delete") {
+            return {
+              type: "annotation_marker_delete",
+              marker: {
+                realizationId: operation.realizationId,
+                entityId: operation.entityId,
+                annotationId: operation.annotationId,
+                projectId: snapshot.projectId,
+                frame: operation.frame,
+                layer: operation.layer,
+                length: operation.length,
+                label: "メモ",
+              },
+              sourceEvidence: operation.sourceEvidence,
+            };
+          }
           if (operation.op === "native_voice_create") {
             return {
               type: "native_voice_create",
@@ -1174,14 +1310,23 @@ export class Ymm4Workflow {
                 primaryLayer: operation.utterance.audioLayer,
                 secondaryLayer: operation.utterance.captionLayer,
               }
-            : {
-                entityId: operation.cue.entityId,
-                realizationId: operation.cue.realizationId,
-                frame: operation.cue.frame,
-                maxLength: operation.cue.maxLength,
-                primaryLayer: operation.cue.layer,
-                secondaryLayer: null,
-              },
+            : operation.type === "native_voice_create"
+              ? {
+                  entityId: operation.cue.entityId,
+                  realizationId: operation.cue.realizationId,
+                  frame: operation.cue.frame,
+                  maxLength: operation.cue.maxLength,
+                  primaryLayer: operation.cue.layer,
+                  secondaryLayer: null,
+                }
+              : {
+                  entityId: operation.marker.entityId,
+                  realizationId: operation.marker.realizationId,
+                  frame: operation.marker.frame,
+                  maxLength: operation.marker.length,
+                  primaryLayer: operation.marker.layer,
+                  secondaryLayer: null,
+                },
         ),
       };
     } catch {

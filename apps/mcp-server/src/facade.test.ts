@@ -334,6 +334,11 @@ test("annotations inspection reports ids and frames and redacts host secrets", a
             promotionStatus: "staged",
             promotionTaskId: "55555555-5555-4555-8555-555555555555",
             promotionPlanDigest: `sha256:${"2".repeat(64)}`,
+            pinEntityId: "ann-aaaaaaaa-pin",
+            pinRealizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            pinFrame: 2531,
+            pinLayer: 90,
+            pinLength: 167,
             audioPath: "C:\\\\secrets\\\\note.wav",
             token: "should-not-leak",
             deviceId: "mic-usb-2",
@@ -380,11 +385,48 @@ test("annotations inspection reports ids and frames and redacts host secrets", a
   assert.equal(rows[0].derivePhase, "succeeded");
   assert.equal(rows[0].promotionStatus, "staged");
   assert.equal(rows[0].promotionPlanDigest, `sha256:${"2".repeat(64)}`);
+  assert.equal(rows[0].pinEntityId, "ann-aaaaaaaa-pin");
+  assert.equal(rows[0].pinRealizationId, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+  assert.equal(rows[0].pinFrame, 2531);
   assert.equal(Object.hasOwn(rows[0], "audioPath"), false);
   assert.equal(Object.hasOwn(rows[0], "token"), false);
   assert.equal(Object.hasOwn(rows[0], "deviceId"), false);
   assert.equal(Object.hasOwn(rows[0], "executable"), false);
   assert.equal(Object.hasOwn(rows[0], "modelPath"), false);
+});
+
+test("studio_annotations pin stages a timeline_edit envelope", async (t) => {
+  const captureId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const planDigest = "sha256:" + "2".repeat(64);
+  const workflow = {
+    async pinAnnotation(input: { annotationId: string; layer?: number }) {
+      assert.equal(input.annotationId, captureId);
+      assert.equal(input.layer, 90);
+      return {
+        operations: [{ type: "annotation_marker_create" }],
+        staged: {
+          handle: "pin-handle",
+          planDigest,
+          baseRevision: 7,
+          operationId: "55555555-5555-4555-8555-555555555555",
+        },
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+  const result = await current.client.callTool({
+    name: "studio_annotations",
+    arguments: { action: "pin", annotationId: captureId },
+  });
+  assert.notEqual(result.isError, true, textFrom(result));
+  assert.match(textFrom(result), /Pin staged as timeline_edit/);
+  assert.match(textFrom(result), /timeline_edit:pin-handle/);
+  const payload = structuredFrom(result);
+  assert.match(
+    String((payload.task as { planDigest?: string } | null)?.planDigest ?? ""),
+    /2{64}/,
+  );
 });
 
 test("studio_take stages and executes only with its exact plan digest", async (t) => {
@@ -2001,6 +2043,67 @@ test("timeline_edit accepts native_voice_create with omitted spokenText", async 
   assert.equal(
     "spokenText" in (stagedInputs[0]?.operations[0] ?? {}),
     false,
+  );
+});
+
+test("timeline_edit accepts annotation_marker_create with sourceEvidence", async (t) => {
+  const handle = "timeline-edit-pin";
+  const planDigest = "a".repeat(64);
+  const stagedInputs: StageTimelineEditInput[] = [];
+  const workflow = {
+    async stageTimelineEdit(input: StageTimelineEditInput) {
+      stagedInputs.push(input);
+      return {
+        handle,
+        digest: planDigest,
+        baseRevision: 31,
+        operationCount: input.operations.length,
+        operationKinds: input.operations.map((operation) => operation.op),
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+  const evidence = {
+    annotationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    captureAudioSha256: `sha256:${"1".repeat(64)}`,
+    transcriptDigest: `sha256:${"2".repeat(64)}`,
+    interpretationDigest: `sha256:${"3".repeat(64)}`,
+  };
+
+  const staged = taskFrom(
+    await current.client.callTool({
+      name: "takegraph_task_stage",
+      arguments: {
+        kind: "timeline_edit",
+        operations: [
+          {
+            op: "annotation_marker_create",
+            entityId: "ann-pin-01",
+            annotationId: evidence.annotationId,
+            frame: 12,
+            layer: 90,
+            length: 30,
+            sourceEvidence: evidence,
+          },
+        ],
+      },
+    }),
+    {
+      taskId: `timeline_edit:${handle}`,
+      kind: "timeline_edit",
+      store: "canonical-project",
+      phase: "staged",
+    },
+  );
+  assert.equal(staged.planDigest, planDigest);
+  assert.equal(stagedInputs[0]?.operations[0]?.op, "annotation_marker_create");
+  assert.deepEqual(
+    stagedInputs[0]?.operations[0] &&
+      "sourceEvidence" in stagedInputs[0].operations[0]
+      ? stagedInputs[0].operations[0].sourceEvidence
+      : undefined,
+    evidence,
   );
 });
 

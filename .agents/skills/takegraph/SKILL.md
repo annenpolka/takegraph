@@ -58,7 +58,9 @@ takegraph_task_execute {
 
 After a `timeline_edit` stage, `availableActions` is typically `inspect` + `execute`. There is no separate approve step. Pass the exact `planDigest` on execute.
 
-Promote a narration annotation as ordinary `timeline_edit` `native_voice_create` operations. Include `sourceEvidence` (`annotationId`, `captureAudioSha256`, `transcriptDigest`, `interpretationDigest`) on each promoted operation so the plan digest binds the capture. The studio notes Promote button and `annotation promote --stage` stage that same `timeline_edit` and record `promotionStatus`. If inspect already shows `promotionStatus: staged`, execute the reported `promotionPlanDigest` — do not restage the same capture. After a verified execute, inspect shows `promotionStatus: committed`. `CutCandidate` stays evidence-only. Do not add a new task kind.
+Promote a narration annotation as ordinary `timeline_edit` `native_voice_create` operations. Include `sourceEvidence` (`annotationId`, `captureAudioSha256`, `transcriptDigest`, `interpretationDigest`) on each promoted operation so the plan digest binds the capture. The studio notes Promote button and `annotation promote --stage` stage that same `timeline_edit` and record `promotionStatus`. If inspect already shows `promotionStatus: staged`, execute the reported `promotionPlanDigest` — do not restage the same capture. After a verified execute, inspect shows `promotionStatus: committed`.
+
+Pin a durable `AnnotationItem` with `annotation_marker_create` on the same `timeline_edit` kind, the studio メモ tab pin button, or `annotation pin --stage`. Unpin with `annotation_marker_delete`, the studio unpin button, or `annotation unpin --stage`. A pin still needs `sourceEvidence`, still refuses dismissed / source-changed / wrong-project captures, and never uses `VoiceItem` or the captured WAV. Inspect may report `pinEntityId` / `pinRealizationId` when the live target already has the pin. `Highlight`, `Note`, and `Verify` stay evidence-only unless the operator pins. `CutCandidate` stays evidence-only until delete/split exist. Do not add a new task kind.
 
 ## Two stores
 
@@ -88,6 +90,7 @@ Inspect views: `overview`, `studio`, `canonical`, `scene`, `catalog`, `tasks`, `
 | Adopt the already-saved active YMM4 project | `project_initialization` `mode=adopt_active` | Separate approve, then execute |
 | Save an untitled active project | `project_initialization` `mode=save_untitled` | `path` only at stage; user must supply it |
 | Add 1–128 portable and/or native voice creates as one edit | `timeline_edit` | Prefer this. One plan, one digest, one commit |
+| Pin or unpin a captured note as a durable annotation marker | `timeline_edit` `annotation_marker_create` / `annotation_marker_delete` | Same envelope as voice creates. Copy inspect digests into `sourceEvidence` |
 | Change or delete an existing native voice | `native_voice_mutation` | Not in `timeline_edit` yet |
 | Portrait / media / effect / template | `native_extension` | Not in `timeline_edit`. Bind exact catalog digests |
 | Studio demo take / variant | `studio_take` / `studio_voice_variant` | Studio store only |
@@ -224,6 +227,31 @@ takegraph_task_execute {
 ```
 
 `mode=correct` takes `text`. Host ASR must already be configured (`TAKEGRAPH_WHISPER_EXECUTABLE` + `TAKEGRAPH_WHISPER_MODEL`). Never invent those paths. A failed derive leaves the capture intact.
+
+Pin a note that should stay as a durable annotation marker (copy digests from inspect):
+
+```
+takegraph_task_stage {
+  "kind": "timeline_edit",
+  "operations": [
+    {
+      "op": "annotation_marker_create",
+      "entityId": "ann-note-01-pin",
+      "annotationId": "<annotationId from inspect>",
+      "frame": 2531,
+      "layer": 90,
+      "length": 167,
+      "label": "メモ",
+      "sourceEvidence": {
+        "annotationId": "<annotationId from inspect>",
+        "captureAudioSha256": "<audioSha256 from inspect>",
+        "transcriptDigest": "<transcriptDigest from inspect>",
+        "interpretationDigest": "<interpretationDigest from inspect>"
+      }
+    }
+  ]
+}
+```
 
 ## Fail closed
 

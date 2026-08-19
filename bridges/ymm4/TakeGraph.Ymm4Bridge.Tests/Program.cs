@@ -12,6 +12,8 @@ var tests = new (string Name, Action Run)[]
     ("cross-runtime structured capability digest", StructuredCapabilityDigestGolden),
     ("remark identity round-trip", RemarkCodec.ValidateRoundTrip),
     ("annotation decoration codec and editorial fingerprint", AnnotationDecorationEditorialFingerprint),
+    ("annotation pin is editorial and decorations skip pinned captures", AnnotationPinIsEditorial),
+    ("timeline-edit plan root may carry sourceEvidence", TimelineEditSourceEvidenceIsAllowed),
     ("portable marker round-trip", PortableMarkerRoundTrip),
     ("native-extension marker round-trip", NativeExtensionMarkerRoundTrip),
     ("marker ownership fields are required", MarkerOwnershipFieldsRequired),
@@ -2877,6 +2879,130 @@ static void AnnotationDecorationEditorialFingerprint()
         (_, _) => throw new InvalidOperationException("unexpected update"),
         _ => throw new InvalidOperationException("unexpected create"));
     Assert(removed.Count == 2, "dismissed captures must drop their decoration");
+}
+
+static void AnnotationPinIsEditorial()
+{
+    var captureId = Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    var pin = new Ymm4Facade.RawItem(
+        new object(),
+        12,
+        AnnotationDecorationCodec.Layer,
+        30,
+        0,
+        "メモ",
+        "",
+        AnnotationDecorationCodec.Append(
+            null,
+            new AnnotationDecorationMarker(
+                AnnotationDecorationCodec.PinNamespace,
+                "project-a",
+                captureId,
+                Guid.Parse("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                "ann-pin-01")),
+        "",
+        "",
+        "TakeGraph.Ymm4Bridge.TakeGraphAnnotationItem",
+        false,
+        false);
+    var decoration = new Ymm4Facade.RawItem(
+        new object(),
+        12,
+        AnnotationDecorationCodec.Layer,
+        30,
+        0,
+        "メモ",
+        "",
+        AnnotationDecorationCodec.Append(
+            null,
+            new AnnotationDecorationMarker(
+                AnnotationDecorationCodec.Namespace,
+                "project-a",
+                captureId,
+                Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))),
+        "",
+        "",
+        "TakeGraph.Ymm4Bridge.TakeGraphAnnotationItem",
+        false,
+        false);
+    var editorial = Ymm4Facade.EditorialItems([pin, decoration]);
+    Assert(editorial.Count == 1 && ReferenceEquals(editorial[0].Item, pin.Item),
+        "pinned annotation items must stay in the editorial fingerprint");
+
+    var active = new CaptureAnnotationDto(
+        captureId,
+        Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        12,
+        42,
+        "scene-1",
+        "project-a",
+        "fp-1",
+        30,
+        "stable",
+        "active",
+        "2026-08-15T00:00:00Z",
+        "sha256:" + new string('a', 64),
+        "起こし");
+    var added = new List<object>();
+    var removed = new List<object>();
+    var created = 0;
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [pin, decoration],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 0 && added.Count == 0 && removed.Count == 1,
+        "a pin must replace the working decoration, not duplicate it");
+
+    var firstCopy = decoration;
+    var secondCopy = decoration with { Item = new object() };
+    added.Clear();
+    removed.Clear();
+    created = 0;
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [firstCopy, secondCopy],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 0 && added.Count == 0 && removed.Count == 0,
+        "copy/paste decoration duplicates must not be treated as canonical");
+}
+
+static void TimelineEditSourceEvidenceIsAllowed()
+{
+    using var document = JsonDocument.Parse(
+        """
+        {
+          "canonicalVersion":1,
+          "operationId":"11111111-1111-4111-8111-111111111111",
+          "baseRevision":7,
+          "target":{"adapterId":"historical-driver","projectId":"closed-project","sceneId":"old-scene","fps":60,"driverVersion":"old/old"},
+          "capabilityDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedScope":{"targetIdentityDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","managedStateDigest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","conflictScopeDigest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "changeBudget":{"maxChangedEntities":1,"maxShiftedEntities":0,"maxShiftFrames":0,"allowLockedChanges":false,"allowUnmanagedChanges":false},
+          "operations":[{"kind":"native_extension","descriptorCatalogDigest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","operation":{}}],
+          "warnings":[],
+          "sourceEvidence":[{"annotationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","captureAudioSha256":"sha256:1111111111111111111111111111111111111111111111111111111111111111","transcriptDigest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","interpretationDigest":"sha256:3333333333333333333333333333333333333333333333333333333333333333"}]
+        }
+        """);
+    var digest = CanonicalJson.Sha256("takegraph-timeline-edit-plan-v1", document.RootElement);
+    Ymm4Facade.ValidateTimelineEditHistoricalBindingForTests(digest, document.RootElement);
 }
 
 static void AnnotationPanelShowsDerivePhaseWithoutPaths()

@@ -167,7 +167,7 @@ another project is ignored; it must not insert into the open timeline.
 If the factory fails, the panel-local overlay remains a UI fallback.
 Overlay drawing is residual and out of Quint.
 
-### Pin (later, still a Patch)
+### Pin (Patch)
 
 A pin is an optional digest-bound `timeline_edit` for a decoration the
 operator wants as a durable owned realization. It is not required for
@@ -176,9 +176,12 @@ dismissed / `SourceChanged` / stale-source captures, and still does not
 use `VoiceItem` or the captured WAV. Unpin is its own edit and is not
 implied by dismiss. Narration promotion and a pin may both exist.
 
-When pin is implemented, `AnnotationItem` becomes a known
-composition-graph kind (`isVisualKind` false). Pin rides the existing
-stage → apply → verified read-back envelope. `importCapture` still
+`AnnotationItem` is a known composition-graph kind (`isVisualKind`
+false). Pin rides the existing stage → apply → verified read-back
+envelope as `annotation_marker_create` / `annotation_marker_delete`.
+The pin remark namespace is `takegraph/annotation-pin/v1`; that item
+stays inside the editorial fingerprint. Working decorations stay on
+`takegraph/annotation/v1` and remain excluded. `importCapture` still
 does not create a pin.
 
 ## Capture Host boundary
@@ -213,9 +216,9 @@ editorial fingerprint) are specified in
 `importCapture` remains an observation. `placeDecoration` may follow it
 and must not change `canonicalHead` or `editorialFingerprint`.
 
-Pin, when implemented, extends `ymm4_composition_graph_protocol.qnt`
-with `AnnotationItem` and reuses the generic change-set / apply
-protocols. It does not add a second approval lifecycle.
+Pin extends `ymm4_composition_graph_protocol.qnt` with `AnnotationItem`
+and reuses the generic change-set / apply protocols. It does not add a
+second approval lifecycle.
 
 The microphone, audio encoder, ASR engine, overlay drawing, YMM4 item
 factory, and operating-system behavior are explicitly out of scope for
@@ -232,8 +235,9 @@ the spec.
    `timeline_edit` with `sourceEvidence`.
 4. Editorial fingerprint excludes `takegraph/annotation/v1` decorations;
    the bridge upserts layer-90 decorations from the active capture list.
-5. Explicit pin: `annotation_marker_create` / delete on `timeline_edit`,
-   after `AnnotationItem` is added to the composition-graph spec.
+5. Explicit pin: `annotation_marker_create` / `annotation_marker_delete`
+   on `timeline_edit`, after `AnnotationItem` was added to the
+   composition-graph spec.
 
 ## Non-goals (first slice)
 

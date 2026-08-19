@@ -1068,15 +1068,8 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             annotation_root,
         } => {
             print_json(
-                &commit_timeline_edit(
-                    connection,
-                    state,
-                    task,
-                    digest,
-                    Some(head),
-                    annotation_root,
-                )
-                .await?,
+                &commit_timeline_edit(connection, state, task, digest, Some(head), annotation_root)
+                    .await?,
             )?;
         }
         Ymm4Command::TimelineEditVerify { connection, task } => {
@@ -1871,10 +1864,7 @@ pub(crate) async fn commit_timeline_edit(
         .await;
     save_json(&task, &staged)?;
     let outcome = outcome?;
-    let receipt_digest = staged
-        .receipt()
-        .map(canonical_receipt_digest)
-        .transpose()?;
+    let receipt_digest = staged.receipt().map(canonical_receipt_digest).transpose()?;
     let promotion_commit = record_timeline_edit_promotions(
         &annotation_root,
         &staged,
@@ -2227,7 +2217,9 @@ mod tests {
         .unwrap();
         let Command::Annotation {
             command:
-                annotation::AnnotationCommand::PromoteCommit { capture, digest, .. },
+                annotation::AnnotationCommand::PromoteCommit {
+                    capture, digest, ..
+                },
         } = cli.command
         else {
             panic!("expected annotation promote-commit");
@@ -2265,6 +2257,46 @@ mod tests {
         assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         assert_eq!(character_name, "ゆっくり霊夢");
         assert_eq!(layer, 2);
+    }
+
+    #[test]
+    fn parses_annotation_pin_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "pin",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command: annotation::AnnotationCommand::Pin { capture, layer, .. },
+        } = cli.command
+        else {
+            panic!("expected annotation pin");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(layer, 90);
+    }
+
+    #[test]
+    fn parses_annotation_unpin_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "unpin",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command: annotation::AnnotationCommand::Unpin { capture, stage, .. },
+        } = cli.command
+        else {
+            panic!("expected annotation unpin");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert!(!stage);
     }
 
     #[test]
