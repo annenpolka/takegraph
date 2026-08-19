@@ -84,39 +84,42 @@ internal sealed partial class Ymm4Facade
         await applyGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            return await Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                var main = RequireMainViewModel();
-                var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
-                    ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
-                var rawItems = ReadItems(timelineViewModel);
-                var projectPath = GetString(main, "ProjectFilePath", "ProjectPath");
-                var projectId = Hash($"project|{projectPath}");
-                var sceneId = GetString(timelineViewModel, "ID", "Id", "SceneId");
-                if (string.IsNullOrWhiteSpace(sceneId))
-                {
-                    throw new BridgeUnavailableException(
-                        "YMM4 active scene identity is unavailable for source-bound composition");
-                }
-                var fps = FindExactFps(main, timelineViewModel)
-                    ?? throw new BridgeUnavailableException("YMM4 scene FPS is unavailable");
-                var preview = RequirePreviewViewModel();
-                var frame = ReadExactPreviewFrame(preview, fps)
-                    ?? throw new BridgeUnavailableException("YMM4 current preview frame is unavailable");
-                var fingerprint = Fingerprint(rawItems, projectPath, sceneId, fps);
-                return BuildSceneCompositionSnapshot(
-                    projectId,
-                    sceneId,
-                    fingerprint,
-                    fps,
-                    frame,
-                    rawItems);
-            });
+            return await Application.Current.Dispatcher.InvokeAsync(ObserveCurrentSceneComposition);
         }
         finally
         {
             applyGate.Release();
         }
+    }
+
+    private SceneCompositionSnapshotDto ObserveCurrentSceneComposition()
+    {
+        var main = RequireMainViewModel();
+        var timelineViewModel = GetMember(main, "ActiveTimelineViewModel")
+            ?? throw new BridgeUnavailableException("No active YMM4 timeline is open");
+        var rawItems = ReadItems(timelineViewModel);
+        var projectPath = GetString(main, "ProjectFilePath", "ProjectPath");
+        var projectId = Hash($"project|{projectPath}");
+        var sceneId = GetString(timelineViewModel, "ID", "Id", "SceneId");
+        if (string.IsNullOrWhiteSpace(sceneId))
+        {
+            throw new BridgeUnavailableException(
+                "YMM4 active scene identity is unavailable for source-bound composition");
+        }
+        var fps = FindExactFps(main, timelineViewModel)
+            ?? throw new BridgeUnavailableException("YMM4 scene FPS is unavailable");
+        var preview = RequirePreviewViewModel();
+        var frame = ReadExactPreviewFrame(preview, fps)
+            ?? ReadExactPreviewFrame(timelineViewModel, fps)
+            ?? throw new BridgeUnavailableException("YMM4 current preview frame is unavailable");
+        var fingerprint = Fingerprint(rawItems, projectPath, sceneId, fps);
+        return BuildSceneCompositionSnapshot(
+            projectId,
+            sceneId,
+            fingerprint,
+            fps,
+            frame,
+            rawItems);
     }
 
     internal static SceneCompositionSnapshotDto BuildSceneCompositionSnapshot(
@@ -276,6 +279,10 @@ internal sealed partial class Ymm4Facade
 
     private static string SceneCompositionKind(string typeName)
     {
+        if (typeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal))
+        {
+            return "annotation";
+        }
         var separator = typeName.LastIndexOf('.');
         var kind = separator >= 0 ? typeName[(separator + 1)..] : typeName;
         if (kind.EndsWith("Item", StringComparison.Ordinal) && kind.Length > "Item".Length)
@@ -6292,6 +6299,11 @@ internal sealed partial class Ymm4Facade
         var projectId = Hash($"project|{projectPath}");
         var managed = ReadManagedItems(rawItems, projectId);
         var managedObjects = FindManagedRawItems(rawItems, projectId)
+            .Concat(rawItems.Where(item =>
+                AnnotationDecorationCodec.TryDecodePin(item.Remark, out var pin)
+                && pin is not null
+                && string.Equals(pin.ProjectId, projectId, StringComparison.Ordinal))
+                .Select(item => item.Item))
             .ToHashSet(ReferenceEqualityComparer.Instance);
         var projectName = GetString(main, "ProjectName", "Title");
         if (string.IsNullOrWhiteSpace(projectName) && !string.IsNullOrWhiteSpace(projectPath))
@@ -6322,7 +6334,9 @@ internal sealed partial class Ymm4Facade
             fingerprint,
             managed,
             nativeExtensions,
-            rawItems.Count(item => !managedObjects.Contains(item.Item)));
+            rawItems.Count(item =>
+                !managedObjects.Contains(item.Item)
+                && !IsEditorialAnnotationItem(item)));
     }
 
     private static string CurrentProjectId()
@@ -6358,6 +6372,28 @@ internal sealed partial class Ymm4Facade
                 voiceItem.CharacterName,
                 marker.RealizationId.ToString("D"),
                 voiceItem.SpokenText));
+        }
+        foreach (var pinItem in rawItems)
+        {
+            if (!AnnotationDecorationCodec.TryDecodePin(pinItem.Remark, out var pin)
+                || pin is null
+                || string.IsNullOrWhiteSpace(pin.EntityId)
+                || !string.Equals(pin.ProjectId, projectId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            result.Add(new ManagedItemDto(
+                pin.EntityId,
+                0,
+                "annotation",
+                pinItem.Frame,
+                pinItem.Layer,
+                pinItem.Length,
+                LabelOfAnnotationItem(pinItem),
+                null,
+                null,
+                null,
+                pin.RealizationId.ToString("D")));
         }
         foreach (var captionItem in rawItems)
         {
@@ -7076,7 +7112,30 @@ internal sealed partial class Ymm4Facade
         return null;
     }
 
-    private static string Fingerprint(
+    internal static IReadOnlyList<RawItem> EditorialItems(IEnumerable<RawItem> items) =>
+        items.Where(IsEditorialItem).ToList();
+
+    internal static bool IsEditorialItem(RawItem item) =>
+        AnnotationDecorationCodec.IsPin(item.Remark) || !IsEditorialAnnotationItem(item);
+
+    private static bool IsEditorialAnnotationItem(RawItem item) =>
+        AnnotationDecorationCodec.IsDecoration(item.Remark, item.Text)
+        || (item.TypeName.Contains("TakeGraphAnnotationItem", StringComparison.Ordinal)
+            && !AnnotationDecorationCodec.IsPin(item.Remark));
+
+    private static string LabelOfAnnotationItem(RawItem item)
+    {
+#if !TAKEGRAPH_YMM4_CONTRACT_STUB
+        if (item.Item is TakeGraphAnnotationItem annotation
+            && !string.IsNullOrWhiteSpace(annotation.Label))
+        {
+            return annotation.Label;
+        }
+#endif
+        return string.IsNullOrWhiteSpace(item.Text) ? "メモ" : item.Text;
+    }
+
+    internal static string Fingerprint(
         IReadOnlyList<RawItem> items,
         string projectPath,
         string sceneId,
@@ -7084,7 +7143,8 @@ internal sealed partial class Ymm4Facade
     {
         var canonical = new StringBuilder();
         canonical.Append(projectPath).Append('|').Append(sceneId).Append('|').Append(fps).AppendLine();
-        foreach (var item in items.OrderBy(value => value.Frame)
+        foreach (var item in EditorialItems(items)
+                     .OrderBy(value => value.Frame)
                      .ThenBy(value => value.Layer)
                      .ThenBy(value => value.TypeName, StringComparer.Ordinal)
                      .ThenBy(value => value.Text, StringComparer.Ordinal)
@@ -7401,17 +7461,57 @@ internal sealed partial class Ymm4Facade
     /// the scene fingerprint.
     internal static int? ReadExactPreviewFrame(object preview, uint fps)
     {
-        foreach (var name in new[] { "CurrentFrame", "Frame", "Position" })
+        var timeline = GetMember(preview, "timeline", "Timeline");
+        var player = GetMember(preview, "player", "Player");
+        foreach (var candidate in new[] { preview, timeline })
         {
-            var value = GetMember(preview, name);
-            if (value is TimeSpan time)
+            if (candidate is null)
             {
-                return checked((int)Math.Round(time.TotalSeconds * fps));
+                continue;
             }
-            if (value is not null && int.TryParse(value.ToString(), out var frame) && frame >= 0)
+            foreach (var name in new[] { "CurrentFrame", "Frame" })
             {
-                return frame;
+                var parsed = ParseExactFrame(GetMember(candidate, name), fps);
+                if (parsed is not null)
+                {
+                    return parsed;
+                }
             }
+        }
+        foreach (var candidate in new[] { preview, player })
+        {
+            if (candidate is null)
+            {
+                continue;
+            }
+            var parsed = ParseExactFrame(GetMember(candidate, "Position"), fps);
+            if (parsed is not null)
+            {
+                return parsed;
+            }
+        }
+        return null;
+    }
+
+    private static int? ParseExactFrame(object? value, uint fps)
+    {
+        if (value is TimeSpan time)
+        {
+            return checked((int)Math.Round(time.TotalSeconds * fps));
+        }
+        if (value is int frame && frame >= 0)
+        {
+            return frame;
+        }
+        if (value is not null
+            && int.TryParse(
+                value.ToString(),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed)
+            && parsed >= 0)
+        {
+            return parsed;
         }
         return null;
     }

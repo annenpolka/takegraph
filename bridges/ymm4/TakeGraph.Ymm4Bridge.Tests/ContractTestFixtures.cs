@@ -92,6 +92,23 @@ internal sealed class EstimatedPreviewFrameFixture
     internal TimeSpan StartPosition { get; init; }
 }
 
+internal sealed class Ymm4TimelineCurrentFrameFixture
+{
+    internal int CurrentFrame { get; init; }
+}
+
+internal sealed class Ymm4PlayerPositionFixture
+{
+    internal TimeSpan Position { get; init; }
+}
+
+internal sealed class Ymm4TimelinePlayheadFixture
+{
+    internal Ymm4TimelineCurrentFrameFixture timeline { get; init; } = new();
+
+    internal Ymm4PlayerPositionFixture player { get; init; } = new();
+}
+
 internal sealed class ThrowingPreservationItemFixture
 {
     public string Dangerous

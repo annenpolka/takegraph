@@ -7,10 +7,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    CanonicalError, ChangeBudget, NativeExtensionIntent, PlanWarning, PlannedCue,
-    PlannedNativeExtension, RevisionId, ScopeFingerprints, TargetIdentity, TargetPlanError,
-    canonical_sha256, managed_cue::validate_planned_cue,
-    native_extension::validate_planned_native_extension,
+    AnnotationId, CanonicalError, CapabilityDependency, ChangeBudget, NativeExtensionIntent,
+    PlanWarning, PlannedAction, PlannedCue, PlannedNativeExtension, RevisionId, ScopeFingerprints,
+    SourceEvidenceRef, TargetIdentity, TargetPlanError, canonical_sha256,
+    managed_cue::validate_planned_cue, native_extension::validate_planned_native_extension,
 };
 
 pub const TIMELINE_EDIT_PLAN_CANONICAL_VERSION: u32 = 1;
@@ -27,6 +27,25 @@ pub enum TimelineEditOperation {
         descriptor_catalog_digest: String,
         operation: Box<PlannedNativeExtension>,
     },
+    AnnotationMarker {
+        marker: Box<PlannedAnnotationMarker>,
+    },
+}
+
+/// Digest-bound pin of a captured note as a durable `AnnotationItem`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannedAnnotationMarker {
+    pub realization_id: Uuid,
+    pub action: PlannedAction,
+    pub entity_id: String,
+    pub annotation_id: AnnotationId,
+    pub project_id: String,
+    pub frame: i32,
+    pub layer: i32,
+    pub length: i32,
+    pub label: String,
+    pub capability_dependencies: Vec<CapabilityDependency>,
 }
 
 impl TimelineEditOperation {
@@ -35,6 +54,7 @@ impl TimelineEditOperation {
         match self {
             Self::ManagedCue { cue } => cue.realization_id,
             Self::NativeExtension { operation, .. } => operation.realization_id,
+            Self::AnnotationMarker { marker } => marker.realization_id,
         }
     }
 
@@ -42,6 +62,7 @@ impl TimelineEditOperation {
     pub fn write_identity(&self) -> String {
         match self {
             Self::ManagedCue { cue } => format!("entity:{}", cue.intent.entity_id),
+            Self::AnnotationMarker { marker } => format!("entity:{}", marker.entity_id),
             Self::NativeExtension { operation, .. } => match &operation.intent {
                 NativeExtensionIntent::UpsertPortrait(intent) => {
                     format!("entity:{}", intent.entity_id)
@@ -70,7 +91,45 @@ impl TimelineEditOperation {
                 require_sha256(descriptor_catalog_digest, "descriptorCatalogDigest")?;
                 validate_planned_native_extension(operation).map_err(Into::into)
             }
+            Self::AnnotationMarker { marker } => marker.validate(),
         }
+    }
+}
+
+impl PlannedAnnotationMarker {
+    fn validate(&self) -> Result<(), TimelineEditError> {
+        if self.entity_id.trim().is_empty() {
+            return Err(TimelineEditError::EmptyField("entityId"));
+        }
+        if self.project_id.trim().is_empty() {
+            return Err(TimelineEditError::EmptyField("projectId"));
+        }
+        if self.label.trim().is_empty() {
+            return Err(TimelineEditError::EmptyField("label"));
+        }
+        if self.annotation_id.0.is_nil() {
+            return Err(TimelineEditError::EmptyField("annotationId"));
+        }
+        if self.frame < 0 || self.layer < 0 || self.length <= 0 {
+            return Err(TimelineEditError::InvalidAnnotationMarkerGeometry);
+        }
+        if !matches!(self.action, PlannedAction::Create | PlannedAction::Delete) {
+            return Err(TimelineEditError::UnsupportedAnnotationMarkerAction);
+        }
+        if self.capability_dependencies.is_empty() {
+            return Err(TimelineEditError::EmptyField("capabilityDependencies"));
+        }
+        for dependency in &self.capability_dependencies {
+            if dependency.feature.trim().is_empty() {
+                return Err(TimelineEditError::EmptyField(
+                    "capabilityDependencies.feature",
+                ));
+            }
+            if let Some(digest) = &dependency.schema_digest {
+                require_sha256(digest, "capabilityDependencies.schemaDigest")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -87,6 +146,9 @@ pub struct TimelineEditPlan {
     pub change_budget: ChangeBudget,
     pub operations: Vec<TimelineEditOperation>,
     pub warnings: Vec<PlanWarning>,
+    /// Optional annotation provenance sealed into the plan digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_evidence: Vec<SourceEvidenceRef>,
 }
 
 impl TimelineEditPlan {
@@ -168,6 +230,11 @@ impl TimelineEditPlan {
                 return Err(TimelineEditError::ConflictingWriteIdentity(identity));
             }
         }
+        for evidence in &self.source_evidence {
+            evidence
+                .validate()
+                .map_err(|error| TimelineEditError::InvalidSourceEvidence(error.to_string()))?;
+        }
         Ok(())
     }
 }
@@ -204,6 +271,12 @@ pub enum TimelineEditError {
     EmptyRealization,
     #[error("multiple operations write the same identity: {0}")]
     ConflictingWriteIdentity(String),
+    #[error("invalid source evidence: {0}")]
+    InvalidSourceEvidence(String),
+    #[error("annotation marker frame/layer/length is illegal")]
+    InvalidAnnotationMarkerGeometry,
+    #[error("annotation markers support only create or delete")]
+    UnsupportedAnnotationMarkerAction,
     #[error(transparent)]
     TargetPlan(#[from] TargetPlanError),
     #[error(transparent)]
@@ -288,7 +361,25 @@ mod tests {
             change_budget: ChangeBudget::create_only(operations.len()),
             operations,
             warnings: vec![],
+            source_evidence: vec![],
         }
+    }
+
+    #[test]
+    fn digest_binds_source_evidence() {
+        use crate::{AnnotationId, SourceEvidenceRef};
+        let operations = vec![TimelineEditOperation::ManagedCue {
+            cue: Box::new(cue("a", 1)),
+        }];
+        let without = plan(operations.clone()).canonical_digest().unwrap();
+        let mut with_evidence = plan(operations);
+        with_evidence.source_evidence = vec![SourceEvidenceRef {
+            annotation_id: AnnotationId::new(),
+            capture_audio_sha256: digest('1'),
+            transcript_digest: digest('2'),
+            interpretation_digest: digest('3'),
+        }];
+        assert_ne!(without, with_evidence.canonical_digest().unwrap());
     }
 
     #[test]
@@ -390,5 +481,53 @@ mod tests {
             value["operations"][0]["cue"]["resolvedRealization"]["character_name"],
             "character"
         );
+    }
+
+    fn marker(entity_id: &str, realization_id: u128) -> PlannedAnnotationMarker {
+        PlannedAnnotationMarker {
+            realization_id: Uuid::from_u128(realization_id),
+            action: PlannedAction::Create,
+            entity_id: entity_id.into(),
+            annotation_id: crate::AnnotationId(Uuid::from_u128(7)),
+            project_id: "project".into(),
+            frame: 12,
+            layer: 90,
+            length: 30,
+            label: "メモ".into(),
+            capability_dependencies: vec![CapabilityDependency {
+                feature: "timelineEdit.apply".into(),
+                minimum_version: 1,
+                schema_digest: Some(digest('a')),
+            }],
+        }
+    }
+
+    #[test]
+    fn annotation_marker_is_a_distinct_write_identity() {
+        let value = serde_json::to_value(plan(vec![TimelineEditOperation::AnnotationMarker {
+            marker: Box::new(marker("ann-pin", 3)),
+        }]))
+        .unwrap();
+        assert_eq!(value["operations"][0]["kind"], "annotation_marker");
+        assert_eq!(value["operations"][0]["marker"]["entityId"], "ann-pin");
+        assert_eq!(value["operations"][0]["marker"]["action"], "create");
+        plan(vec![TimelineEditOperation::AnnotationMarker {
+            marker: Box::new(marker("ann-pin", 3)),
+        }])
+        .validate()
+        .expect("valid pin");
+    }
+
+    #[test]
+    fn annotation_marker_update_is_refused() {
+        let mut invalid = marker("ann-pin", 3);
+        invalid.action = PlannedAction::Update;
+        assert!(matches!(
+            plan(vec![TimelineEditOperation::AnnotationMarker {
+                marker: Box::new(invalid),
+            }])
+            .validate(),
+            Err(TimelineEditError::UnsupportedAnnotationMarkerAction)
+        ));
     }
 }

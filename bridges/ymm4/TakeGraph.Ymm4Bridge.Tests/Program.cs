@@ -1,7 +1,9 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Input;
 using TakeGraph.Ymm4Bridge;
 
 var tests = new (string Name, Action Run)[]
@@ -9,6 +11,9 @@ var tests = new (string Name, Action Run)[]
     ("cross-runtime request digests", ApplyRequestDigest.ValidateCrossRuntimeGolden),
     ("cross-runtime structured capability digest", StructuredCapabilityDigestGolden),
     ("remark identity round-trip", RemarkCodec.ValidateRoundTrip),
+    ("annotation decoration codec and editorial fingerprint", AnnotationDecorationEditorialFingerprint),
+    ("annotation pin is editorial and decorations skip pinned captures", AnnotationPinIsEditorial),
+    ("timeline-edit plan root may carry sourceEvidence", TimelineEditSourceEvidenceIsAllowed),
     ("portable marker round-trip", PortableMarkerRoundTrip),
     ("native-extension marker round-trip", NativeExtensionMarkerRoundTrip),
     ("marker ownership fields are required", MarkerOwnershipFieldsRequired),
@@ -45,6 +50,11 @@ var tests = new (string Name, Action Run)[]
     ("request JSON boundary is strict and maps to 400", StrictRequestJsonMapsTo400),
     ("submitted HTTP responses are not rewritten", SubmittedHttpResponsesAreNotRewritten),
     ("preview settle accepts the requested frame", PreviewSettleAcceptsRequestedFrame),
+    ("annotation jump is source-bound and non-mutating", AnnotationJumpIsSourceBoundAndNonMutating),
+    ("capture-host client is loopback and token-bound", CaptureHostClientIsLoopbackAndTokenBound),
+    ("captured hotkeys format non-function keys", CapturedHotkeysFormatNonFunctionKeys),
+    ("annotation panel shows derive phase without paths", AnnotationPanelShowsDerivePhaseWithoutPaths),
+    ("error clipboard copies non-empty errors only", ErrorClipboardCopiesNonEmptyErrorsOnly),
     ("native-extension inner JSON is exact", NativeExtensionInnerJsonIsExact),
     ("scene capture combines capture and restoration failures", SceneCaptureFailureIsCombined),
     ("portable descriptor digests bind exact configuration", PortableDescriptorDigestsBindConfiguration),
@@ -347,6 +357,14 @@ static void CurrentSceneCompositionNeverEstimatesPlayhead()
     };
     Assert(Ymm4Facade.ReadExactPreviewFrame(estimatedOnly, 60) is null,
         "composition observer estimated a playhead from progress or start position");
+
+    var ymm4Timeline = new Ymm4TimelinePlayheadFixture
+    {
+        timeline = new Ymm4TimelineCurrentFrameFixture { CurrentFrame = 2531 },
+        player = new Ymm4PlayerPositionFixture { Position = TimeSpan.FromSeconds(10) },
+    };
+    Assert(Ymm4Facade.ReadExactPreviewFrame(ymm4Timeline, 60) == 2531,
+        "YMM4 Timeline.CurrentFrame was not observed as the exact playhead");
 }
 
 static void PortableMarkerRoundTrip()
@@ -2556,6 +2574,500 @@ static void PreviewSettleAcceptsRequestedFrame()
         "stale playhead was treated as settled");
     Assert(!Ymm4Facade.PreviewFrameSettled(null, 1080),
         "unreadable playhead was treated as settled");
+}
+
+static void AnnotationJumpIsSourceBoundAndNonMutating()
+{
+    var observed = new SceneCompositionSnapshotDto(
+        1,
+        "project-a",
+        "scene-1",
+        "fp-1",
+        30,
+        120,
+        new SceneCompositionViewportDto("unavailable", null, null),
+        [],
+        "partial",
+        ["viewport"]);
+    Ymm4Facade.EnsureAnnotationSeekBinding(
+        new AnnotationSeekRequest("project-a", "scene-1", "fp-1", 2531),
+        observed);
+    Ymm4Facade.EnsureAnnotationSeekDidNotMutate(false, false, "sel-a", "sel-a");
+
+    var wrongProject = CaptureBridgeConflict(
+        () => Ymm4Facade.EnsureAnnotationSeekBinding(
+            new AnnotationSeekRequest("project-b", "scene-1", "fp-1", 2531),
+            observed));
+    Assert(wrongProject.Message.Contains("captured source", StringComparison.Ordinal),
+        "wrong project was allowed to seek");
+
+    var wrongFingerprint = CaptureBridgeConflict(
+        () => Ymm4Facade.EnsureAnnotationSeekBinding(
+            new AnnotationSeekRequest("project-a", "scene-1", "fp-2", 2531),
+            observed));
+    Assert(wrongFingerprint.ActualFingerprint == "fp-1",
+        "fingerprint mismatch did not report the live source");
+
+    _ = CaptureBridgeValidation(
+        () => Ymm4Facade.EnsureAnnotationSeekBinding(
+            new AnnotationSeekRequest("project-a", "scene-1", "fp-1", -1),
+            observed));
+    _ = CaptureBridgeValidation(
+        () => Ymm4Facade.EnsureAnnotationSeekDidNotMutate(false, true, "sel-a", "sel-a"));
+    _ = CaptureBridgeValidation(
+        () => Ymm4Facade.EnsureAnnotationSeekDidNotMutate(false, false, "sel-a", "sel-b"));
+}
+
+static BridgeConflictException CaptureBridgeConflict(Action action)
+{
+    try
+    {
+        action();
+        throw new InvalidOperationException("expected source-binding failure was not raised");
+    }
+    catch (BridgeConflictException error)
+    {
+        return error;
+    }
+}
+
+static void CaptureHostClientIsLoopbackAndTokenBound()
+{
+    Assert(!CaptureHostClient.IsLoopback(new Uri("http://192.168.1.4:8767")),
+        "LAN address was treated as a capture-host loopback");
+    Assert(CaptureHostClient.IsLoopback(new Uri("http://127.0.0.1:8767")),
+        "127.0.0.1 was rejected as a capture-host loopback");
+    try
+    {
+        _ = new CaptureHostClient("http://192.168.1.4:8767", "secret");
+        throw new InvalidOperationException("non-loopback capture-host client was accepted");
+    }
+    catch (CaptureHostException)
+    {
+    }
+
+    var listener = new HttpListener();
+    var port = FreeLoopbackPort();
+    listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+    listener.Start();
+    using var started = new CancellationTokenSource();
+    var serve = Task.Run(async () =>
+    {
+        while (!started.IsCancellationRequested)
+        {
+            HttpListenerContext context;
+            try
+            {
+                context = await listener.GetContextAsync().ConfigureAwait(false);
+            }
+            catch (HttpListenerException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            if (context.Request.Headers["x-takegraph-token"] != "loopback-test-token")
+            {
+                context.Response.StatusCode = 401;
+                context.Response.Close();
+                continue;
+            }
+            if (context.Request.Url?.AbsolutePath == "/v1/annotations")
+            {
+                var body = """
+                    {"annotations":[{"annotationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sessionId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","startFrame":2531,"endFrame":2698,"sceneId":"scene-1","projectId":"project-a","sourceFingerprint":"fp-1","fps":30,"stability":"stable","lifecycle":"active","capturedAtUtc":"2026-08-14T13:34:57Z","audioSha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+                    """;
+                var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "application/json";
+                context.Response.OutputStream.Write(bytes);
+                context.Response.Close();
+                continue;
+            }
+            context.Response.StatusCode = 404;
+            context.Response.Close();
+        }
+    }, started.Token);
+
+    try
+    {
+        using var denied = new CaptureHostClient($"http://127.0.0.1:{port}/", "wrong-token");
+        try
+        {
+            denied.AnnotationsAsync().GetAwaiter().GetResult();
+            throw new InvalidOperationException("wrong capture-host token was accepted");
+        }
+        catch (CaptureHostException error)
+        {
+            Assert(error.Status == System.Net.HttpStatusCode.Unauthorized,
+                "wrong token did not map to 401");
+        }
+
+        using var client = new CaptureHostClient($"http://127.0.0.1:{port}/", "loopback-test-token");
+        var listed = client.AnnotationsAsync(20, "project-a").GetAwaiter().GetResult();
+        Assert(listed.Annotations.Count == 1, "authorized list did not return the planted annotation");
+        Assert(listed.Annotations[0].StartFrame == 2531, "list lost the start frame");
+        Assert(listed.Annotations[0].SourceFingerprint == "fp-1", "list lost the source fingerprint");
+    }
+    finally
+    {
+        started.Cancel();
+        listener.Stop();
+        listener.Close();
+        try
+        {
+            serve.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (AggregateException)
+        {
+        }
+    }
+}
+
+static void ErrorClipboardCopiesNonEmptyErrorsOnly()
+{
+    Assert(TakeGraphBridgeViewModel.ErrorClipboardText("") is null, "empty error was copyable");
+    Assert(TakeGraphBridgeViewModel.ErrorClipboardText("   ") is null, "blank error was copyable");
+    Assert(
+        TakeGraphBridgeViewModel.ErrorClipboardText("annotation decoration insert failed: x")
+            == "annotation decoration insert failed: x",
+        "error text was not copied as-is");
+}
+
+static void AnnotationDecorationEditorialFingerprint()
+{
+    AnnotationDecorationCodec.ValidateRoundTrip();
+    var captureId = Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    var dismissed = new CaptureAnnotationDto(
+        captureId,
+        Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        12,
+        12,
+        "scene-1",
+        "project-a",
+        "fp-1",
+        30,
+        "stable",
+        "dismissed",
+        "2026-08-15T00:00:00Z",
+        "sha256:" + new string('a', 64),
+        "起こし");
+    var active = dismissed with { Lifecycle = "active", EndFrame = 42, TranscriptSummary = null };
+    var plans = AnnotationDecorationCodec.PlansFrom([dismissed, active], "project-a", "scene-1");
+    Assert(plans.Count == 1, "dismissed captures must not keep a decoration plan");
+    Assert(plans[0].Frame == 12 && plans[0].Length == 30, "span must be max(1, end-start)");
+    Assert(plans[0].Label == "メモ", "empty transcript must label メモ");
+    Assert(
+        AnnotationDecorationCodec.PlansFrom([active], "project-other", "scene-1").Count == 0,
+        "decorations must not be planned for a different project");
+    Assert(
+        AnnotationDecorationCodec.PlansFrom([active], "project-a", "scene-other").Count == 0,
+        "decorations must not be planned for a different scene");
+    Assert(
+        AnnotationDecorationCodec.PlansFrom([active], "", "scene-1").Count == 0,
+        "missing live project id must refuse to plan decorations");
+    Assert(
+        AnnotationDecorationCodec.SameScene(
+            "11663257-8299-4000-8000-000000000001",
+            "11663257-8299-4000-8000-000000000001".ToUpperInvariant()),
+        "scene ids must compare as GUIDs");
+
+    var voice = new Ymm4Facade.RawItem(
+        new object(),
+        10,
+        2,
+        30,
+        0,
+        "こんにちは",
+        "",
+        "",
+        "ゆっくり霊夢",
+        "",
+        "YukkuriMovieMaker.Project.Items.VoiceItem",
+        false,
+        false);
+    var decoration = new Ymm4Facade.RawItem(
+        new object(),
+        12,
+        AnnotationDecorationCodec.Layer,
+        30,
+        0,
+        "メモ",
+        "",
+        AnnotationDecorationCodec.Append(
+            null,
+            new AnnotationDecorationMarker(
+                AnnotationDecorationCodec.Namespace,
+                "project-a",
+                captureId,
+                Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))),
+        "",
+        "",
+        "TakeGraph.Ymm4Bridge.TakeGraphAnnotationItem",
+        false,
+        false);
+    var editorial = Ymm4Facade.EditorialItems([voice, decoration]);
+    Assert(editorial.Count == 1 && ReferenceEquals(editorial[0].Item, voice.Item),
+        "decoration items must be excluded from the editorial fingerprint set");
+
+    var added = new List<object>();
+    var removed = new List<object>();
+    var created = 0;
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [voice],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 1 && added.Count == 1 && removed.Count == 0, "active capture must upsert one decoration");
+
+    created = 0;
+    added.Clear();
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [voice],
+        "project-other",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 0 && added.Count == 0, "foreign project list must not insert decorations");
+
+    var leftoverText = decoration with
+    {
+        TypeName = "YukkuriMovieMaker.Project.Items.TextItem",
+    };
+    removed.Clear();
+    created = 0;
+    added.Clear();
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [leftoverText],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(removed.Count == 1 && created == 1, "legacy TextItem decorations must be replaced");
+
+    Ymm4Facade.SyncAnnotationDecorations(
+        [dismissed],
+        [decoration],
+        "project-a",
+        "scene-1",
+        _ => throw new InvalidOperationException("unexpected add"),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ => throw new InvalidOperationException("unexpected create"));
+    Assert(removed.Count == 2, "dismissed captures must drop their decoration");
+}
+
+static void AnnotationPinIsEditorial()
+{
+    var captureId = Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    var pin = new Ymm4Facade.RawItem(
+        new object(),
+        12,
+        AnnotationDecorationCodec.Layer,
+        30,
+        0,
+        "メモ",
+        "",
+        AnnotationDecorationCodec.Append(
+            null,
+            new AnnotationDecorationMarker(
+                AnnotationDecorationCodec.PinNamespace,
+                "project-a",
+                captureId,
+                Guid.Parse("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                "ann-pin-01")),
+        "",
+        "",
+        "TakeGraph.Ymm4Bridge.TakeGraphAnnotationItem",
+        false,
+        false);
+    var decoration = new Ymm4Facade.RawItem(
+        new object(),
+        12,
+        AnnotationDecorationCodec.Layer,
+        30,
+        0,
+        "メモ",
+        "",
+        AnnotationDecorationCodec.Append(
+            null,
+            new AnnotationDecorationMarker(
+                AnnotationDecorationCodec.Namespace,
+                "project-a",
+                captureId,
+                Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))),
+        "",
+        "",
+        "TakeGraph.Ymm4Bridge.TakeGraphAnnotationItem",
+        false,
+        false);
+    var editorial = Ymm4Facade.EditorialItems([pin, decoration]);
+    Assert(editorial.Count == 1 && ReferenceEquals(editorial[0].Item, pin.Item),
+        "pinned annotation items must stay in the editorial fingerprint");
+
+    var active = new CaptureAnnotationDto(
+        captureId,
+        Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        12,
+        42,
+        "scene-1",
+        "project-a",
+        "fp-1",
+        30,
+        "stable",
+        "active",
+        "2026-08-15T00:00:00Z",
+        "sha256:" + new string('a', 64),
+        "起こし");
+    var added = new List<object>();
+    var removed = new List<object>();
+    var created = 0;
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [pin, decoration],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 0 && added.Count == 0 && removed.Count == 1,
+        "a pin must replace the working decoration, not duplicate it");
+
+    var firstCopy = decoration;
+    var secondCopy = decoration with { Item = new object() };
+    added.Clear();
+    removed.Clear();
+    created = 0;
+    Ymm4Facade.SyncAnnotationDecorations(
+        [active],
+        [firstCopy, secondCopy],
+        "project-a",
+        "scene-1",
+        items => added.AddRange(items),
+        items => removed.AddRange(items),
+        (_, _) => throw new InvalidOperationException("unexpected update"),
+        _ =>
+        {
+            created++;
+            return new object();
+        });
+    Assert(created == 0 && added.Count == 0 && removed.Count == 0,
+        "copy/paste decoration duplicates must not be treated as canonical");
+}
+
+static void TimelineEditSourceEvidenceIsAllowed()
+{
+    using var document = JsonDocument.Parse(
+        """
+        {
+          "canonicalVersion":1,
+          "operationId":"11111111-1111-4111-8111-111111111111",
+          "baseRevision":7,
+          "target":{"adapterId":"historical-driver","projectId":"closed-project","sceneId":"old-scene","fps":60,"driverVersion":"old/old"},
+          "capabilityDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedScope":{"targetIdentityDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","managedStateDigest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","conflictScopeDigest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "changeBudget":{"maxChangedEntities":1,"maxShiftedEntities":0,"maxShiftFrames":0,"allowLockedChanges":false,"allowUnmanagedChanges":false},
+          "operations":[{"kind":"native_extension","descriptorCatalogDigest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","operation":{}}],
+          "warnings":[],
+          "sourceEvidence":[{"annotationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","captureAudioSha256":"sha256:1111111111111111111111111111111111111111111111111111111111111111","transcriptDigest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","interpretationDigest":"sha256:3333333333333333333333333333333333333333333333333333333333333333"}]
+        }
+        """);
+    var digest = CanonicalJson.Sha256("takegraph-timeline-edit-plan-v1", document.RootElement);
+    Ymm4Facade.ValidateTimelineEditHistoricalBindingForTests(digest, document.RootElement);
+}
+
+static void AnnotationPanelShowsDerivePhaseWithoutPaths()
+{
+    var running = new CaptureAnnotationDto(
+        Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        2531,
+        2698,
+        "scene-1",
+        "project-a",
+        "fp-1",
+        30,
+        "stable",
+        "active",
+        "2026-08-14T13:34:57Z",
+        "sha256:" + new string('a', 64),
+        null,
+        null,
+        "running");
+    Assert(
+        new AnnotationRowViewModel(running).DisplayLabel.Contains("起こし中", StringComparison.Ordinal),
+        "running derive phase was not shown on the row");
+    Assert(
+        !new AnnotationRowViewModel(running).DisplayLabel.Contains("whisper", StringComparison.OrdinalIgnoreCase),
+        "row label leaked an ASR name");
+
+    var failed = running with { DerivePhase = "failed" };
+    Assert(
+        new AnnotationRowViewModel(failed).DisplayLabel.Contains("起こし失敗", StringComparison.Ordinal),
+        "failed derive phase was not shown on the row");
+
+    var panel = new AnnotationPanelState
+    {
+        Connection = CaptureHostConnection.Connected,
+        Derive = new CaptureHostDeriveDto("running", running.AnnotationId, "起こし中"),
+    };
+    Assert(panel.StatusLabel.Contains("起こし中", StringComparison.Ordinal), "host status hid transcribing");
+    Assert(panel.Hint == "起こし中", "host hint did not use the path-free derive message");
+    Assert(!panel.Hint.Contains('\\') && !panel.Hint.Contains(".exe", StringComparison.Ordinal),
+        "derive hint contained a path");
+}
+
+static void CapturedHotkeysFormatNonFunctionKeys()
+{
+    Assert(
+        TakeGraphBridgeViewModel.FormatCapturedHotkey(ModifierKeys.Control, Key.R) == "Ctrl+R",
+        "Ctrl+R was not formatted for the capture host");
+    Assert(
+        TakeGraphBridgeViewModel.FormatCapturedHotkey(ModifierKeys.None, Key.Pause) == "Pause",
+        "Pause was not formatted for the capture host");
+    Assert(
+        TakeGraphBridgeViewModel.FormatCapturedHotkey(
+            ModifierKeys.Control | ModifierKeys.Shift,
+            Key.Space) == "Ctrl+Shift+Space",
+        "Ctrl+Shift+Space was not formatted for the capture host");
+}
+
+static int FreeLoopbackPort()
+{
+    var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+    probe.Start();
+    var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+    return port;
 }
 
 static void SceneCaptureFailureIsCombined()

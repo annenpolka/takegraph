@@ -107,3 +107,8 @@ That plan also separates semantic apply verification from a future visual scene
 inspection workflow: YMM-rendered frame captures are imported and reviewed as
 content-addressed artifacts, while final video correctness still requires an
 authoritative render receipt.
+
+Human voice annotations captured during playback are a separate input channel:
+immutable evidence in their own store series, promoted into edits only through
+the existing patch pipeline. That boundary is specified in
+[Voice Annotation Capture](voice-annotation.md).

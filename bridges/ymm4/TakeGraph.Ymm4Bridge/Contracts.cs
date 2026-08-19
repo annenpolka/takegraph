@@ -287,6 +287,17 @@ internal sealed record NativeVoiceCueDto(
     int Layer,
     int MaxLength);
 
+internal sealed record AnnotationMarkerDto(
+    Guid RealizationId,
+    string Action,
+    string EntityId,
+    Guid AnnotationId,
+    string ProjectId,
+    int Frame,
+    int Layer,
+    int Length,
+    string Label);
+
 internal sealed record NativeVoiceMutationDto(
     Guid RealizationId,
     string EntityId,

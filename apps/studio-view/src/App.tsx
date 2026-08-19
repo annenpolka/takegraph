@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { AnnotationsPanel } from "./annotations";
 import {
   createStudioHostBridge,
+  type AnnotationRow,
   type ProjectState,
 } from "./host-bridge";
 
-type StudioRegion = "script" | "preview" | "voice";
+type StudioRegion = "script" | "preview" | "voice" | "notes";
 
 function formatDuration(durationMs: number): string {
   return `${(durationMs / 1_000).toFixed(2)}s`;
@@ -25,6 +27,11 @@ export function App() {
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [activeRegion, setActiveRegion] = useState<StudioRegion>("preview");
+  const [annotations, setAnnotations] = useState<AnnotationRow[]>([]);
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string>();
+  const [annotationDraft, setAnnotationDraft] = useState("");
+  const [promoteCharacter, setPromoteCharacter] = useState("ゆっくり霊夢");
+  const [promoteLayer, setPromoteLayer] = useState(2);
 
   useEffect(() => {
     let active = true;
@@ -100,6 +107,42 @@ export function App() {
     if (next) await bridge.focusUtterance(next).catch(() => undefined);
   }
 
+  async function refreshAnnotations() {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const rows = await bridge.listAnnotations();
+      setAnnotations(rows);
+      setSelectedAnnotationId((current) => {
+        if (current && rows.some((row) => row.annotationId === current)) return current;
+        return rows[0]?.annotationId;
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    const selected = annotations.find((row) => row.annotationId === selectedAnnotationId);
+    setAnnotationDraft(selected?.transcriptSummary ?? "");
+  }, [annotations, selectedAnnotationId]);
+
+  async function runAnnotation(
+    action: () => Promise<AnnotationRow[]>,
+  ): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+    try {
+      setAnnotations(await action());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function stageSelectedTake() {
     if (!selectedTake) return;
     const next = await run(() => bridge.stageTake(selectedTake.id));
@@ -171,6 +214,21 @@ export function App() {
         >
           <span>音声</span>
           <em>{takes?.length ?? "—"}</em>
+        </button>
+        <button
+          id="tab-notes"
+          type="button"
+          role="tab"
+          aria-controls="region-notes"
+          aria-selected={activeRegion === "notes"}
+          className={activeRegion === "notes" ? "active" : ""}
+          onClick={() => {
+            setActiveRegion("notes");
+            void refreshAnnotations();
+          }}
+        >
+          <span>メモ</span>
+          <em>{annotations.length}</em>
         </button>
       </nav>
 
@@ -288,6 +346,65 @@ export function App() {
             </div>
           )}
         </aside>
+        <AnnotationsPanel
+          active={activeRegion === "notes"}
+          annotations={annotations}
+          selectedId={selectedAnnotationId}
+          draft={annotationDraft}
+          characterName={promoteCharacter}
+          layer={promoteLayer}
+          busy={busy}
+          onSelect={setSelectedAnnotationId}
+          onDraft={setAnnotationDraft}
+          onCharacterName={setPromoteCharacter}
+          onLayer={setPromoteLayer}
+          onRefresh={() => void refreshAnnotations()}
+          onCorrect={() => {
+            if (!selectedAnnotationId) return;
+            void runAnnotation(() =>
+              bridge.correctAnnotation(selectedAnnotationId, annotationDraft),
+            );
+          }}
+          onDismiss={() => {
+            if (!selectedAnnotationId) return;
+            void runAnnotation(() => bridge.dismissAnnotation(selectedAnnotationId));
+          }}
+          onInterpret={() => {
+            if (!selectedAnnotationId) return;
+            void runAnnotation(() => bridge.interpretAnnotation(selectedAnnotationId));
+          }}
+          onPromote={() => {
+            if (!selectedAnnotationId) return;
+            void run(async () => {
+              await bridge.promoteAnnotation({
+                annotationId: selectedAnnotationId,
+                characterName: promoteCharacter,
+                layer: promoteLayer,
+              });
+              const rows = await bridge.listAnnotations();
+              setAnnotations(rows);
+              return state ?? (await bridge.loadProjectState());
+            });
+          }}
+          onPin={() => {
+            if (!selectedAnnotationId) return;
+            void run(async () => {
+              await bridge.pinAnnotation(selectedAnnotationId);
+              const rows = await bridge.listAnnotations();
+              setAnnotations(rows);
+              return state ?? (await bridge.loadProjectState());
+            });
+          }}
+          onUnpin={() => {
+            if (!selectedAnnotationId) return;
+            void run(async () => {
+              await bridge.unpinAnnotation(selectedAnnotationId);
+              const rows = await bridge.listAnnotations();
+              setAnnotations(rows);
+              return state ?? (await bridge.loadProjectState());
+            });
+          }}
+        />
       </section>
     </main>
   );

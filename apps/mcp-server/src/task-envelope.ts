@@ -19,6 +19,7 @@ export const TASK_KINDS = [
   "native_extension",
   "project_initialization",
   "scene_inspection",
+  "annotation_derive",
   "checkpoint",
   "render",
   "reconciliation",

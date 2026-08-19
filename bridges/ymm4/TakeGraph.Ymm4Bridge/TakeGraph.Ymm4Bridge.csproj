@@ -44,6 +44,10 @@
       <HintPath>$(Ymm4Path)\YukkuriMovieMaker.Plugin.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="YukkuriMovieMaker">
+      <HintPath>$(Ymm4Path)\YukkuriMovieMaker.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />

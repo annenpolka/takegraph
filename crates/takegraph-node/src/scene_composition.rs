@@ -23,6 +23,11 @@ pub fn parse_composition_item_kind(kind: &str) -> ItemKind {
     match kind {
         "Audio" | "AudioItem" => ItemKind::AudioItem,
         "Voice" | "VoiceItem" => ItemKind::VoiceItem,
+        "Annotation"
+        | "AnnotationItem"
+        | "TakeGraphAnnotationItem"
+        | "annotation"
+        | "takegraphannotation" => ItemKind::AnnotationItem,
         "Image" | "ImageItem" | "Video" | "VideoItem" => ItemKind::AssetItem,
         "Text" | "TextItem" => ItemKind::TextItem,
         "Shape" | "ShapeItem" => ItemKind::ShapeItem,
@@ -468,6 +473,14 @@ mod tests {
     #[test]
     fn composition_kind_parser_is_explicit_and_fail_closed() {
         assert_eq!(parse_composition_item_kind("Voice"), ItemKind::VoiceItem);
+        assert_eq!(
+            parse_composition_item_kind("TakeGraphAnnotationItem"),
+            ItemKind::AnnotationItem
+        );
+        assert_eq!(
+            parse_composition_item_kind("annotation"),
+            ItemKind::AnnotationItem
+        );
         assert_eq!(parse_composition_item_kind("TextItem"), ItemKind::TextItem);
         assert_eq!(parse_composition_item_kind("Shape"), ItemKind::ShapeItem);
         assert_eq!(parse_composition_item_kind("Image"), ItemKind::AssetItem);

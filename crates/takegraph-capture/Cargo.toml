@@ -1,0 +1,38 @@
+[package]
+name = "takegraph-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+cpal = "0.15"
+global-hotkey = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+takegraph-core = { path = "../takegraph-core" }
+takegraph-node = { path = "../takegraph-node" }
+takegraph-service = { path = "../takegraph-service" }
+thiserror.workspace = true
+time = { version = "0.3", features = ["formatting"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+reqwest.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

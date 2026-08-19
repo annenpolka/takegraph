@@ -29,6 +29,7 @@ const facadeNames = [
 const studioToolNames = [
   "studio_project_describe",
   "studio_ui_get_state",
+  "studio_annotations",
   "voice_generate_variant",
   "voice_stage_take_patch",
   "studio_patch_commit",
@@ -291,6 +292,141 @@ test("overview inspection reports both stores through the single read facade", a
   assert.match(textFrom(inspected), /sessionRevision: 4/);
   assert.match(textFrom(inspected), /canonicalRevision: 9/);
   assert.match(textFrom(inspected), /YMM4 Project/);
+});
+
+test("annotations inspection reports ids and frames and redacts host secrets", async (t) => {
+  const workflow = {
+    async listAnnotations() {
+      return {
+        projectId: "project-a",
+        sourceFingerprint: "fp-1",
+        audioPath: "C:\\\\secrets\\\\note.wav",
+        token: "capture-host-token",
+        deviceId: "mic-usb-2",
+        executable: "C:\\\\whisper\\\\whisper-cli.exe",
+        modelPath: "C:\\\\models\\\\ggml-large.bin",
+        annotations: [
+          {
+            annotationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            startFrame: 2531,
+            endFrame: 2698,
+            sceneId: "scene-1",
+            projectId: "project-a",
+            sourceFingerprint: "fp-1",
+            fps: 30,
+            stability: "stable",
+            lifecycle: "active",
+            capturedAtUtc: "2026-08-14T13:34:57Z",
+            stale: false,
+            transcriptSummary: "今のところ残す",
+            intents: [{ kind: "highlight", reason: "残す" }],
+            temporal: {
+              referenceFrame: 2531,
+              startOffsetFrames: -180,
+              endOffsetFrames: 0,
+              relation: "range",
+            },
+            interpretationDigest: `sha256:${"c".repeat(64)}`,
+            audioSha256: `sha256:${"a".repeat(64)}`,
+            transcriptDigest: `sha256:${"b".repeat(64)}`,
+            derivePhase: "succeeded",
+            promotionStatus: "staged",
+            promotionTaskId: "55555555-5555-4555-8555-555555555555",
+            promotionPlanDigest: `sha256:${"2".repeat(64)}`,
+            pinEntityId: "ann-aaaaaaaa-pin",
+            pinRealizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            pinFrame: 2531,
+            pinLayer: 90,
+            pinLength: 167,
+            audioPath: "C:\\\\secrets\\\\note.wav",
+            token: "should-not-leak",
+            deviceId: "mic-usb-2",
+            executable: "C:\\\\whisper\\\\whisper-cli.exe",
+            modelPath: "C:\\\\models\\\\ggml-large.bin",
+          },
+        ],
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+
+  const inspected = await current.client.callTool({
+    name: "takegraph_inspect",
+    arguments: { view: "annotations" },
+  });
+  assert.notEqual(inspected.isError, true, textFrom(inspected));
+  assert.match(textFrom(inspected), /aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/);
+  assert.match(textFrom(inspected), /frames=2531-2698/);
+  assert.match(textFrom(inspected), /recording is local-only/);
+  assert.doesNotMatch(
+    textFrom(inspected),
+    /capture-host-token|mic-usb-2|note\.wav|whisper-cli|ggml-large/i,
+  );
+
+  const payload = structuredFrom(inspected);
+  assert.equal(payload.view, "annotations");
+  assert.equal(payload.projectId, "project-a");
+  assert.equal(Object.hasOwn(payload, "audioPath"), false);
+  assert.equal(Object.hasOwn(payload, "token"), false);
+  assert.equal(Object.hasOwn(payload, "deviceId"), false);
+  assert.equal(Object.hasOwn(payload, "executable"), false);
+  assert.equal(Object.hasOwn(payload, "modelPath"), false);
+  const rows = payload.annotations as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].startFrame, 2531);
+  assert.equal(rows[0].stale, false);
+  assert.deepEqual(rows[0].intents, [{ kind: "highlight", reason: "残す" }]);
+  assert.equal((rows[0].temporal as { relation?: string }).relation, "range");
+  assert.equal(typeof rows[0].interpretationDigest, "string");
+  assert.equal(rows[0].audioSha256, `sha256:${"a".repeat(64)}`);
+  assert.equal(rows[0].transcriptDigest, `sha256:${"b".repeat(64)}`);
+  assert.equal(rows[0].derivePhase, "succeeded");
+  assert.equal(rows[0].promotionStatus, "staged");
+  assert.equal(rows[0].promotionPlanDigest, `sha256:${"2".repeat(64)}`);
+  assert.equal(rows[0].pinEntityId, "ann-aaaaaaaa-pin");
+  assert.equal(rows[0].pinRealizationId, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+  assert.equal(rows[0].pinFrame, 2531);
+  assert.equal(Object.hasOwn(rows[0], "audioPath"), false);
+  assert.equal(Object.hasOwn(rows[0], "token"), false);
+  assert.equal(Object.hasOwn(rows[0], "deviceId"), false);
+  assert.equal(Object.hasOwn(rows[0], "executable"), false);
+  assert.equal(Object.hasOwn(rows[0], "modelPath"), false);
+});
+
+test("studio_annotations pin stages a timeline_edit envelope", async (t) => {
+  const captureId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const planDigest = "sha256:" + "2".repeat(64);
+  const workflow = {
+    async pinAnnotation(input: { annotationId: string; layer?: number }) {
+      assert.equal(input.annotationId, captureId);
+      assert.equal(input.layer, 90);
+      return {
+        operations: [{ type: "annotation_marker_create" }],
+        staged: {
+          handle: "pin-handle",
+          planDigest,
+          baseRevision: 7,
+          operationId: "55555555-5555-4555-8555-555555555555",
+        },
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+  const result = await current.client.callTool({
+    name: "studio_annotations",
+    arguments: { action: "pin", annotationId: captureId },
+  });
+  assert.notEqual(result.isError, true, textFrom(result));
+  assert.match(textFrom(result), /Pin staged as timeline_edit/);
+  assert.match(textFrom(result), /timeline_edit:pin-handle/);
+  const payload = structuredFrom(result);
+  assert.match(
+    String((payload.task as { planDigest?: string } | null)?.planDigest ?? ""),
+    /2{64}/,
+  );
 });
 
 test("studio_take stages and executes only with its exact plan digest", async (t) => {
@@ -1604,6 +1740,85 @@ test("portable_voice and native_voice stage ordered item batches through one tas
 
 });
 
+test("annotation_derive stages and executes without host paths", async (t) => {
+  const handle = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const planDigest = "7".repeat(64);
+  const captureId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const calls: string[] = [];
+  const workflow = {
+    async stageAnnotationDerive(input: {
+      captureId: string;
+      mode: string;
+      text?: string;
+    }) {
+      calls.push(`stage:${input.mode}:${input.captureId}`);
+      assert.equal(input.captureId, captureId);
+      assert.equal(input.mode, "correct");
+      assert.equal(input.text, "今のところ残す");
+      return {
+        handle,
+        captureId,
+        mode: input.mode,
+        phase: "staged",
+        planDigest,
+        whisperConfigured: false,
+        executable: "C:\\\\whisper\\\\whisper-cli.exe",
+        modelPath: "C:\\\\models\\\\ggml.bin",
+      };
+    },
+    async runAnnotationDerive(nativeHandle: string, digest: string) {
+      calls.push("run");
+      assert.equal(nativeHandle, handle);
+      assert.equal(digest, planDigest);
+      return {
+        handle,
+        captureId,
+        mode: "correct",
+        phase: "completed",
+        planDigest,
+        transcriptSummary: "今のところ残す",
+        executable: "C:\\\\whisper\\\\whisper-cli.exe",
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+
+  const staged = await current.client.callTool({
+    name: "takegraph_task_stage",
+    arguments: {
+      kind: "annotation_derive",
+      captureId,
+      mode: "correct",
+      text: "今のところ残す",
+    },
+  });
+  assert.notEqual(staged.isError, true, textFrom(staged));
+  assert.match(textFrom(staged), /annotation_derive:/);
+  assert.match(textFrom(staged), /captureId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/);
+  assert.doesNotMatch(textFrom(staged), /whisper-cli|ggml\.bin/i);
+  const stagedPayload = structuredFrom(staged);
+  assert.equal(stagedPayload.kind, "annotation_derive");
+  assert.equal(stagedPayload.phase, "staged");
+  assert.deepEqual(stagedPayload.availableActions, ["inspect", "execute"]);
+  const details = stagedPayload.details as Record<string, unknown>;
+  assert.equal(Object.hasOwn(details, "executable"), false);
+  assert.equal(Object.hasOwn(details, "modelPath"), false);
+
+  const ran = await current.client.callTool({
+    name: "takegraph_task_execute",
+    arguments: {
+      taskId: stagedPayload.taskId,
+      intent: "run",
+      planDigest,
+    },
+  });
+  assert.notEqual(ran.isError, true, textFrom(ran));
+  assert.match(textFrom(ran), /phase completed/);
+  assert.doesNotMatch(textFrom(ran), /whisper-cli|ggml\.bin/i);
+  assert.deepEqual(calls, [`stage:correct:${captureId}`, "run"]);
+});
+
 test("timeline_edit stages ordered heterogeneous creates as one exact-digest task", async (t) => {
   const handle = "timeline-edit-01";
   const planDigest = "6".repeat(64);
@@ -1828,6 +2043,67 @@ test("timeline_edit accepts native_voice_create with omitted spokenText", async 
   assert.equal(
     "spokenText" in (stagedInputs[0]?.operations[0] ?? {}),
     false,
+  );
+});
+
+test("timeline_edit accepts annotation_marker_create with sourceEvidence", async (t) => {
+  const handle = "timeline-edit-pin";
+  const planDigest = "a".repeat(64);
+  const stagedInputs: StageTimelineEditInput[] = [];
+  const workflow = {
+    async stageTimelineEdit(input: StageTimelineEditInput) {
+      stagedInputs.push(input);
+      return {
+        handle,
+        digest: planDigest,
+        baseRevision: 31,
+        operationCount: input.operations.length,
+        operationKinds: input.operations.map((operation) => operation.op),
+      };
+    },
+  } as unknown as Ymm4Workflow;
+  const current = await connect({ ymm4Workflow: workflow });
+  t.after(current.close);
+  const evidence = {
+    annotationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    captureAudioSha256: `sha256:${"1".repeat(64)}`,
+    transcriptDigest: `sha256:${"2".repeat(64)}`,
+    interpretationDigest: `sha256:${"3".repeat(64)}`,
+  };
+
+  const staged = taskFrom(
+    await current.client.callTool({
+      name: "takegraph_task_stage",
+      arguments: {
+        kind: "timeline_edit",
+        operations: [
+          {
+            op: "annotation_marker_create",
+            entityId: "ann-pin-01",
+            annotationId: evidence.annotationId,
+            frame: 12,
+            layer: 90,
+            length: 30,
+            sourceEvidence: evidence,
+          },
+        ],
+      },
+    }),
+    {
+      taskId: `timeline_edit:${handle}`,
+      kind: "timeline_edit",
+      store: "canonical-project",
+      phase: "staged",
+    },
+  );
+  assert.equal(staged.planDigest, planDigest);
+  assert.equal(stagedInputs[0]?.operations[0]?.op, "annotation_marker_create");
+  assert.deepEqual(
+    stagedInputs[0]?.operations[0] &&
+      "sourceEvidence" in stagedInputs[0].operations[0]
+      ? stagedInputs[0].operations[0].sourceEvidence
+      : undefined,
+    evidence,
   );
 });
 

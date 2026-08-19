@@ -2,19 +2,22 @@ use std::{fs, io::Write as _, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use takegraph_core::ProjectInitializationMode;
-use takegraph_core::{Patch, PatchStatus, ReconciliationDecision, RevisionId};
+use takegraph_core::{Patch, PatchStatus, ReconciliationDecision, RevisionId, canonical_sha256};
 use takegraph_node::{
     ManagedUtterance, RenderOverwritePolicy, VoiceProvider, VoicevoxClient, Ymm4BridgeClient,
     Ymm4Error, Ymm4NativeVoiceCue, Ymm4NativeVoiceMutation,
 };
+use takegraph_service::annotation_store::AnnotationStore;
 use takegraph_service::{
     DurableProjectStore, NativeExtensionStageManifest, ProjectOperationStore,
     ReconciliationChildTask, ReconciliationDownstreamPreview, SceneReviewDecision,
     TimelineEditStageManifest, Ymm4ExportPatch, Ymm4NativeExtensionTask,
     Ymm4NativeVoiceExportPatch, Ymm4NativeVoiceMutationPatch, Ymm4TimelineEditTask,
+    commit_promotions_from_plan,
 };
 use uuid::Uuid;
 
+mod annotation;
 mod scene;
 
 #[derive(Debug, Parser)]
@@ -46,6 +49,11 @@ enum Command {
     Ymm4 {
         #[command(subcommand)]
         command: Ymm4Command,
+    },
+    /// Capture human voice annotations during YMM4 playback.
+    Annotation {
+        #[command(subcommand)]
+        command: annotation::AnnotationCommand,
     },
 }
 
@@ -88,8 +96,8 @@ enum VoicevoxCommand {
     },
 }
 
-#[derive(Debug, Args)]
-struct Ymm4Connection {
+#[derive(Debug, Clone, Args)]
+pub(crate) struct Ymm4Connection {
     #[arg(
         long,
         env = "TAKEGRAPH_YMM4_ENDPOINT",
@@ -105,15 +113,15 @@ struct Ymm4Connection {
     expected_project_id: Option<String>,
 }
 
-#[derive(Debug, Args)]
-struct ProjectStateOptions {
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ProjectStateOptions {
     /// Shared root for service-owned canonical project revision stores.
     #[arg(
         long,
         env = "TAKEGRAPH_PROJECT_STATE_ROOT",
         default_value = ".takegraph/project-store"
     )]
-    state_root: PathBuf,
+    pub(crate) state_root: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -289,6 +297,12 @@ enum Ymm4Command {
         digest: String,
         #[arg(long, default_value_t = 0)]
         head: u64,
+        #[arg(
+            long,
+            env = "TAKEGRAPH_ANNOTATION_STORE_ROOT",
+            default_value = ".takegraph/annotation-store"
+        )]
+        annotation_root: PathBuf,
     },
     /// Verify every managed cue in a staged or committed mixed transaction.
     TimelineEditVerify {
@@ -756,6 +770,7 @@ async fn run_async(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Voicevox { command } => run_voicevox(command).await,
         Command::Ymm4 { command } => Box::pin(run_ymm4(command)).await,
+        Command::Annotation { command } => annotation::run(command).await,
     }
 }
 
@@ -1050,33 +1065,12 @@ async fn run_ymm4(command: Ymm4Command) -> Result<(), Box<dyn std::error::Error>
             task,
             digest,
             head,
+            annotation_root,
         } => {
-            let client = ymm4_client(connection)?;
-            let mut staged = Ymm4TimelineEditTask::from_json_slice(&fs::read(&task)?)?;
-            let store =
-                DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
-            let canonical_head = require_canonical_head(&store, RevisionId(head))?;
-            let authorization_head =
-                timeline_edit_authorization_head(&staged.patch, canonical_head);
-            staged.approve(&digest, authorization_head)?;
-            save_json(&task, &staged)?;
-            let outcome = staged
-                .apply_and_finalize_durable(&client, &store, canonical_head)
-                .await;
-            // Persist an authenticated terminal failure receipt as well as a
-            // successful commit. Status recovery must not collapse
-            // recovery-required or rolled-back work back to merely Approved.
-            save_json(&task, &staged)?;
-            let outcome = outcome?;
-            print_json(&serde_json::json!({
-                "taskFile": task,
-                "baseRevision": staged.patch.base,
-                "revision": outcome.revision,
-                "canonicalReplay": outcome.canonical_replay,
-                "operationId": staged.operation_id,
-                "receipt": staged.receipt(),
-                "status": staged.patch.status,
-            }))?;
+            print_json(
+                &commit_timeline_edit(connection, state, task, digest, Some(head), annotation_root)
+                    .await?,
+            )?;
         }
         Ymm4Command::TimelineEditVerify { connection, task } => {
             let client = ymm4_client(connection)?;
@@ -1826,7 +1820,7 @@ fn save_reconciliation_downstream_task(
     }
 }
 
-fn print_json(value: &impl serde::Serialize) -> Result<(), serde_json::Error> {
+pub(crate) fn print_json(value: &impl serde::Serialize) -> Result<(), serde_json::Error> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
@@ -1849,6 +1843,92 @@ fn require_canonical_head(
 /// a persisted committed task re-authorize only its original exact digest.
 /// Durable replay still receives and checks the caller's current canonical
 /// head before consulting the operation-bound commit record and bridge receipt.
+pub(crate) async fn commit_timeline_edit(
+    connection: Ymm4Connection,
+    state: ProjectStateOptions,
+    task: PathBuf,
+    digest: String,
+    requested_head: Option<u64>,
+    annotation_root: PathBuf,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let client = ymm4_client(connection)?;
+    let mut staged = Ymm4TimelineEditTask::from_json_slice(&fs::read(&task)?)?;
+    let store = DurableProjectStore::open_scoped(&state.state_root, &staged.target.project_id)?;
+    let requested = requested_head.unwrap_or(store.head()?.0);
+    let canonical_head = require_canonical_head(&store, RevisionId(requested))?;
+    let authorization_head = timeline_edit_authorization_head(&staged.patch, canonical_head);
+    staged.approve(&digest, authorization_head)?;
+    save_json(&task, &staged)?;
+    let outcome = staged
+        .apply_and_finalize_durable(&client, &store, canonical_head)
+        .await;
+    save_json(&task, &staged)?;
+    let outcome = outcome?;
+    let receipt_digest = staged.receipt().map(canonical_receipt_digest).transpose()?;
+    let promotion_commit = record_timeline_edit_promotions(
+        &annotation_root,
+        &staged,
+        outcome.revision,
+        receipt_digest.as_deref(),
+    );
+    Ok(serde_json::json!({
+        "taskFile": task,
+        "baseRevision": staged.patch.base,
+        "revision": outcome.revision,
+        "canonicalReplay": outcome.canonical_replay,
+        "operationId": staged.operation_id,
+        "receipt": staged.receipt(),
+        "receiptDigest": receipt_digest,
+        "promotionCommit": promotion_commit,
+        "status": staged.patch.status,
+    }))
+}
+
+fn canonical_receipt_digest(
+    receipt: &takegraph_node::Ymm4TimelineEditReceipt,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(canonical_sha256(
+        "takegraph-timeline-edit-receipt-v1",
+        receipt,
+    )?)
+}
+
+fn record_timeline_edit_promotions(
+    annotation_root: &PathBuf,
+    staged: &Ymm4TimelineEditTask,
+    committed_revision: RevisionId,
+    receipt_digest: Option<&str>,
+) -> serde_json::Value {
+    if staged.timeline_edit_plan.source_evidence.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let Some(receipt_digest) = receipt_digest else {
+        return serde_json::json!({
+            "status": "error",
+            "error": "verified receipt is missing",
+        });
+    };
+    let recorded = AnnotationStore::open_scoped(annotation_root, &staged.target.project_id)
+        .map_err(|error| error.to_string())
+        .and_then(|annotations| {
+            commit_promotions_from_plan(
+                &annotations,
+                &staged.timeline_edit_plan.source_evidence,
+                &staged.operation_id.to_string(),
+                committed_revision,
+                receipt_digest,
+            )
+            .map_err(|error| error.to_string())
+        });
+    match recorded {
+        Ok(count) => serde_json::json!({ "status": "committed", "count": count }),
+        Err(error) => serde_json::json!({
+            "status": "error",
+            "error": error,
+        }),
+    }
+}
+
 fn timeline_edit_authorization_head(patch: &Patch, canonical_head: RevisionId) -> RevisionId {
     if patch.status == PatchStatus::Committed {
         patch.base
@@ -1867,7 +1947,9 @@ fn open_canonical(
     Ok(store)
 }
 
-fn ymm4_client(connection: Ymm4Connection) -> Result<Ymm4BridgeClient, Box<dyn std::error::Error>> {
+pub(crate) fn ymm4_client(
+    connection: Ymm4Connection,
+) -> Result<Ymm4BridgeClient, Box<dyn std::error::Error>> {
     let token = load_ymm4_token(connection.token, connection.credentials)?;
     let client = Ymm4BridgeClient::new(&connection.endpoint, token)?;
     Ok(match connection.expected_project_id {
@@ -1876,7 +1958,7 @@ fn ymm4_client(connection: Ymm4Connection) -> Result<Ymm4BridgeClient, Box<dyn s
     })
 }
 
-fn save_json<T: serde::Serialize>(
+pub(crate) fn save_json<T: serde::Serialize>(
     path: &PathBuf,
     value: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1903,7 +1985,7 @@ fn save_json<T: serde::Serialize>(
     Ok(())
 }
 
-fn load_ymm4_token(
+pub(crate) fn load_ymm4_token(
     configured_token: Option<String>,
     configured_credentials: Option<PathBuf>,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -1958,6 +2040,295 @@ fn ymm4_native_voice_bridge_artifact_root() -> Result<PathBuf, Box<dyn std::erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_annotation_listen_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "listen",
+            "--hotkey",
+            "F8",
+            "--annotation-root",
+            r".takegraph\annotation-store",
+            "--bind",
+            "http://127.0.0.1:8767",
+            "--token",
+            "secret",
+            "--expected-project-id",
+            "project-1",
+        ])
+        .unwrap();
+
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::Listen {
+                    hotkey,
+                    annotation_root,
+                    bind,
+                    connection,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation listen");
+        };
+        assert_eq!(hotkey.as_deref(), Some("F8"));
+        assert_eq!(
+            annotation_root,
+            PathBuf::from(r".takegraph\annotation-store")
+        );
+        assert_eq!(bind, "http://127.0.0.1:8767");
+        assert_eq!(connection.expected_project_id.as_deref(), Some("project-1"));
+    }
+
+    #[test]
+    fn annotation_listen_hotkey_is_optional() {
+        let cli = Cli::try_parse_from(["takegraph", "annotation", "listen", "--token", "secret"])
+            .unwrap();
+        let Command::Annotation {
+            command: annotation::AnnotationCommand::Listen { hotkey, .. },
+        } = cli.command
+        else {
+            panic!("expected annotation listen");
+        };
+        assert_eq!(hotkey, None);
+    }
+
+    #[test]
+    fn parses_annotation_list_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "list",
+            "--project-id",
+            "project-a",
+            "--annotation-root",
+            r".takegraph\annotation-store",
+            "--limit",
+            "20",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::List {
+                    project_id, limit, ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation list");
+        };
+        assert_eq!(project_id.as_deref(), Some("project-a"));
+        assert_eq!(limit, 20);
+    }
+
+    #[test]
+    fn parses_annotation_transcribe_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "transcribe",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--executable",
+            r"C:\whisper\whisper-cli.exe",
+            "--model",
+            r"C:\models\ggml.bin",
+            "--language",
+            "ja",
+            "--text",
+            "今のところ残す",
+            "--project-id",
+            "project-a",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::Transcribe {
+                    capture,
+                    executable,
+                    model,
+                    language,
+                    text,
+                    project_id,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation transcribe");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(
+            executable,
+            Some(PathBuf::from(r"C:\whisper\whisper-cli.exe"))
+        );
+        assert_eq!(model, Some(PathBuf::from(r"C:\models\ggml.bin")));
+        assert_eq!(language, "ja");
+        assert_eq!(text.as_deref(), Some("今のところ残す"));
+        assert_eq!(project_id.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn parses_annotation_interpret_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "interpret",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--intent",
+            "highlight",
+            "--reason",
+            "残す",
+            "--project-id",
+            "project-a",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::Interpret {
+                    capture,
+                    intents,
+                    reason,
+                    project_id,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation interpret");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(intents, vec!["highlight"]);
+        assert_eq!(reason.as_deref(), Some("残す"));
+        assert_eq!(project_id.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn parses_annotation_promote_commit_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "promote-commit",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--digest",
+            &format!("sha256:{}", "2".repeat(64)),
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::PromoteCommit {
+                    capture, digest, ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation promote-commit");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert!(digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn parses_annotation_promote_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "promote",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--character-name",
+            "ゆっくり霊夢",
+            "--layer",
+            "2",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::Promote {
+                    capture,
+                    character_name,
+                    layer,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation promote");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(character_name, "ゆっくり霊夢");
+        assert_eq!(layer, 2);
+    }
+
+    #[test]
+    fn parses_annotation_pin_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "pin",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command: annotation::AnnotationCommand::Pin { capture, layer, .. },
+        } = cli.command
+        else {
+            panic!("expected annotation pin");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(layer, 90);
+    }
+
+    #[test]
+    fn parses_annotation_unpin_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "unpin",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command: annotation::AnnotationCommand::Unpin { capture, stage, .. },
+        } = cli.command
+        else {
+            panic!("expected annotation unpin");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert!(!stage);
+    }
+
+    #[test]
+    fn parses_annotation_derive_stage_command() {
+        let cli = Cli::try_parse_from([
+            "takegraph",
+            "annotation",
+            "derive-stage",
+            "--capture",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--mode",
+            "correct",
+            "--text",
+            "今のところ残す",
+        ])
+        .unwrap();
+        let Command::Annotation {
+            command:
+                annotation::AnnotationCommand::DeriveStage {
+                    capture,
+                    mode,
+                    text,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected annotation derive-stage");
+        };
+        assert_eq!(capture, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(mode, "correct");
+        assert_eq!(text.as_deref(), Some("今のところ残す"));
+    }
 
     #[test]
     fn parses_current_frame_composition_command_with_project_binding() {

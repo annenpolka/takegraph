@@ -52,6 +52,7 @@ pub(crate) fn project_managed_item(item: &Ymm4ManagedItem) -> ManagedSemanticIte
             ManagedItemKind::Audio => "portable_audio".into(),
             ManagedItemKind::Caption => "portable_caption".into(),
             ManagedItemKind::Voice => "ymm4_native_voice".into(),
+            ManagedItemKind::Annotation => "ymm4_annotation_marker".into(),
         },
         owned_fields,
     }
@@ -189,16 +190,21 @@ mod tests {
                 ManagedItemKind::Audio => 10,
                 ManagedItemKind::Caption => 20,
                 ManagedItemKind::Voice => 30,
+                ManagedItemKind::Annotation => 90,
             },
             length: 90,
-            text: matches!(kind, ManagedItemKind::Caption | ManagedItemKind::Voice)
-                .then(|| "caption".into()),
+            text: matches!(
+                kind,
+                ManagedItemKind::Caption | ManagedItemKind::Voice | ManagedItemKind::Annotation
+            )
+            .then(|| "caption".into()),
             spoken_text: matches!(kind, ManagedItemKind::Voice).then(|| "caption".into()),
             audio_path: matches!(kind, ManagedItemKind::Audio).then(|| "voice.wav".into()),
-            artifact_hash: (!matches!(kind, ManagedItemKind::Voice))
+            artifact_hash: (!matches!(kind, ManagedItemKind::Voice | ManagedItemKind::Annotation))
                 .then(|| "sha256:artifact".into()),
             speaker: matches!(kind, ManagedItemKind::Voice).then(|| "speaker".into()),
-            realization_id: matches!(kind, ManagedItemKind::Voice).then(Uuid::new_v4),
+            realization_id: matches!(kind, ManagedItemKind::Voice | ManagedItemKind::Annotation)
+                .then(Uuid::new_v4),
         }
     }
 

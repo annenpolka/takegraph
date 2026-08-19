@@ -3,6 +3,7 @@
 //! This crate contains deterministic state transitions only. It intentionally
 //! has no filesystem, network, database, or operating-system dependencies.
 
+pub mod annotation;
 pub mod composition_graph;
 pub mod edit_surface;
 pub mod edit_transaction;
@@ -15,6 +16,11 @@ pub mod revision;
 pub mod timeline_edit;
 pub mod voice;
 
+pub use annotation::{
+    AnnotationCapture, AnnotationError, AnnotationId, AnnotationIntent, AnnotationInterpretation,
+    AnnotationTranscript, CaptureSessionId, CaptureStability, CapturedAudioEvidence, SourceAnchor,
+    SourceEvidenceRef, TemporalReference, TemporalRelation,
+};
 pub use composition_graph::{
     CompositionError, CompositionGraph, CompositionIntent, CompositionOutcome, EntityId,
     FRAME_BUFFER_ID, GraphBinding, GraphEntity, INITIAL_FOCUS_ID, INITIAL_REVISION, Interpolation,
@@ -68,7 +74,7 @@ pub use reconciliation::{
 };
 pub use revision::{Patch, PatchError, PatchId, PatchStatus, RevisionId};
 pub use timeline_edit::{
-    TIMELINE_EDIT_MAX_OPERATIONS, TIMELINE_EDIT_PLAN_CANONICAL_VERSION, TimelineEditError,
-    TimelineEditOperation, TimelineEditPlan,
+    PlannedAnnotationMarker, TIMELINE_EDIT_MAX_OPERATIONS, TIMELINE_EDIT_PLAN_CANONICAL_VERSION,
+    TimelineEditError, TimelineEditOperation, TimelineEditPlan,
 };
 pub use voice::{AudioArtifact, VoiceTake, VoiceTakeError, VoiceTakeStatus, VoiceTaskIdentity};

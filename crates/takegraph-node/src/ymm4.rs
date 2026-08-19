@@ -128,6 +128,7 @@ pub enum ManagedItemKind {
     Audio,
     Caption,
     Voice,
+    Annotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +614,20 @@ pub struct Ymm4NativeVoiceCue {
     pub frame: i32,
     pub layer: i32,
     pub max_length: i32,
+}
+
+/// Digest-bound annotation pin applied as a dedicated non-visual item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Ymm4AnnotationMarkerCue {
+    pub realization_id: Uuid,
+    pub entity_id: String,
+    pub annotation_id: Uuid,
+    pub project_id: String,
+    pub frame: i32,
+    pub layer: i32,
+    pub length: i32,
+    pub label: String,
 }
 
 /// One exact, identity-bound mutation of a native YMM4 `VoiceItem`.
@@ -2086,6 +2101,7 @@ mod tests {
                 }),
             }],
             warnings: vec![],
+            source_evidence: vec![],
         }
     }
 

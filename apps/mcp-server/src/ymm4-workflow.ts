@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -208,6 +208,7 @@ export interface StageYmm4Input {
   frame: number;
   audioLayer: number;
   captionLayer: number;
+  sourceEvidence?: SourceEvidenceInput;
 }
 
 export interface StageYmm4BatchInput {
@@ -215,6 +216,13 @@ export interface StageYmm4BatchInput {
 }
 
 export type StageYmm4Request = StageYmm4Input | StageYmm4BatchInput;
+
+export interface SourceEvidenceInput {
+  annotationId: string;
+  captureAudioSha256: string;
+  transcriptDigest: string;
+  interpretationDigest: string;
+}
 
 export interface StageNativeVoiceInput {
   entityId: string;
@@ -224,6 +232,7 @@ export interface StageNativeVoiceInput {
   frame: number;
   layer: number;
   maxLength: number;
+  sourceEvidence?: SourceEvidenceInput;
 }
 
 export interface StageNativeVoiceBatchInput {
@@ -323,13 +332,94 @@ export interface StageNativeExtensionInput {
   maxChangedEntities?: number;
 }
 
+export interface StageAnnotationMarkerCreateInput {
+  entityId: string;
+  annotationId: string;
+  frame: number;
+  layer: number;
+  length: number;
+  label?: string;
+  sourceEvidence?: SourceEvidenceInput;
+}
+
+export interface StageAnnotationMarkerDeleteInput {
+  entityId: string;
+  realizationId: string;
+  annotationId: string;
+  frame: number;
+  layer: number;
+  length: number;
+  sourceEvidence?: SourceEvidenceInput;
+}
+
 export type TimelineEditOperationInput =
   | ({ op: "portable_voice_create" } & StageYmm4Input)
-  | ({ op: "native_voice_create" } & StageNativeVoiceInput);
+  | ({ op: "native_voice_create" } & StageNativeVoiceInput)
+  | ({ op: "annotation_marker_create" } & StageAnnotationMarkerCreateInput)
+  | ({ op: "annotation_marker_delete" } & StageAnnotationMarkerDeleteInput);
 
 export interface StageTimelineEditInput {
   operations: TimelineEditOperationInput[];
   maxChangedEntities?: number;
+}
+
+function timelineEditOpsFromPromote(preview: {
+  operations?: unknown;
+}): TimelineEditOperationInput[] {
+  const operations = Array.isArray(preview.operations) ? preview.operations : [];
+  const mapped: TimelineEditOperationInput[] = [];
+  for (const item of operations) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as {
+      type?: string;
+      cue?: Record<string, unknown>;
+      sourceEvidence?: SourceEvidenceInput;
+    };
+    if (
+      row.type === "annotation_marker_create" ||
+      row.type === "annotation_marker_delete"
+    ) {
+      const marker = (item as { marker?: Record<string, unknown> }).marker ?? {};
+      if (row.type === "annotation_marker_delete") {
+        mapped.push({
+          op: "annotation_marker_delete",
+          entityId: String(marker.entityId ?? ""),
+          realizationId: String(marker.realizationId ?? ""),
+          annotationId: String(marker.annotationId ?? ""),
+          frame: Number(marker.frame),
+          layer: Number(marker.layer),
+          length: Number(marker.length),
+          sourceEvidence: row.sourceEvidence,
+        });
+        continue;
+      }
+      mapped.push({
+        op: "annotation_marker_create",
+        entityId: String(marker.entityId ?? ""),
+        annotationId: String(marker.annotationId ?? ""),
+        frame: Number(marker.frame),
+        layer: Number(marker.layer),
+        length: Number(marker.length),
+        label: typeof marker.label === "string" ? marker.label : undefined,
+        sourceEvidence: row.sourceEvidence,
+      });
+      continue;
+    }
+    if (row.type !== "native_voice_create") continue;
+    const cue = row.cue ?? {};
+    mapped.push({
+      op: "native_voice_create",
+      entityId: String(cue.entityId ?? ""),
+      displayText: String(cue.displayText ?? ""),
+      spokenText: typeof cue.spokenText === "string" ? cue.spokenText : undefined,
+      characterName: String(cue.characterName ?? ""),
+      frame: Number(cue.frame),
+      layer: Number(cue.layer),
+      maxLength: Number(cue.maxLength),
+      sourceEvidence: row.sourceEvidence,
+    });
+  }
+  return mapped;
 }
 
 type PreparedTimelineEditOperation =
@@ -348,6 +438,7 @@ type PreparedTimelineEditOperation =
         audioLayer: number;
         captionLayer: number;
       };
+      sourceEvidence?: SourceEvidenceInput;
     }
   | {
       type: "native_voice_create";
@@ -362,6 +453,21 @@ type PreparedTimelineEditOperation =
         layer: number;
         maxLength: number;
       };
+      sourceEvidence?: SourceEvidenceInput;
+    }
+  | {
+      type: "annotation_marker_create" | "annotation_marker_delete";
+      marker: {
+        realizationId: string;
+        entityId: string;
+        annotationId: string;
+        projectId: string;
+        frame: number;
+        layer: number;
+        length: number;
+        label: string;
+      };
+      sourceEvidence?: SourceEvidenceInput;
     };
 
 export interface ReconciliationDecisionInput {
@@ -417,6 +523,7 @@ export class Ymm4Workflow {
   private readonly nativeVoiceArtifactDirectory: string;
   private readonly projectStateRoot: string;
   private readonly projectOperationRoot: string;
+  private readonly annotationStoreRoot: string;
   private readonly executable: string;
   private readonly executableArgs: string[];
 
@@ -427,6 +534,7 @@ export class Ymm4Workflow {
       nativeVoiceArtifactDirectory?: string;
       projectStateRoot?: string;
       projectOperationRoot?: string;
+      annotationStoreRoot?: string;
       executable?: string;
       executableArgs?: string[];
     } = {},
@@ -450,6 +558,12 @@ export class Ymm4Workflow {
         options.projectOperationRoot,
         "TAKEGRAPH_PROJECT_OPERATION_ROOT",
         path.join(workspaceRoot, ".takegraph", "project-operations"),
+      );
+    this.annotationStoreRoot =
+      configuredDirectory(
+        options.annotationStoreRoot,
+        "TAKEGRAPH_ANNOTATION_STORE_ROOT",
+        path.join(workspaceRoot, ".takegraph", "annotation-store"),
       );
     this.executable = options.executable ?? defaultExecutable;
     this.executableArgs = options.executableArgs ?? [];
@@ -480,6 +594,272 @@ export class Ymm4Workflow {
       "composition",
       ...this.expectedProjectArgs(canonical),
     ])) as Ymm4CompositionSnapshot;
+  }
+
+  async listAnnotations(): Promise<unknown> {
+    let projectId: string;
+    let sourceFingerprint: string | undefined;
+    try {
+      const observed = await this.composition();
+      projectId = observed.projectId;
+      sourceFingerprint = observed.sourceFingerprint;
+    } catch {
+      const snapshot = ((await this.describe()).snapshot ?? {}) as Ymm4Snapshot;
+      projectId = snapshot.projectId;
+      sourceFingerprint = snapshot.fingerprint;
+    }
+    if (!projectId || projectId.trim().length === 0) {
+      throw new Error("annotation inspect requires an active project identity");
+    }
+    return this.runJson([
+      "annotation",
+      "list",
+      "--project-id",
+      projectId,
+      ...(sourceFingerprint
+        ? ["--source-fingerprint", sourceFingerprint]
+        : []),
+      "--annotation-root",
+      this.annotationStoreRoot,
+      "--limit",
+      "50",
+    ]);
+  }
+
+  private annotationEvidenceFromPrepared(
+    prepared: PreparedTimelineEditOperation[],
+  ): SourceEvidenceInput[] {
+    const seen = new Set<string>();
+    const evidence: SourceEvidenceInput[] = [];
+    for (const operation of prepared) {
+      const item = operation.sourceEvidence;
+      if (!item || seen.has(item.annotationId)) continue;
+      seen.add(item.annotationId);
+      evidence.push(item);
+    }
+    return evidence;
+  }
+
+  private async recordAnnotationPromotions(
+    prepared: PreparedTimelineEditOperation[],
+    planDigest: string,
+    baseRevision: number,
+    taskId: string,
+  ): Promise<void> {
+    for (const evidence of this.annotationEvidenceFromPrepared(prepared)) {
+      await this.runJson([
+        "annotation",
+        "promotion-stage",
+        "--capture",
+        evidence.annotationId,
+        "--task-id",
+        taskId,
+        "--plan-digest",
+        planDigest,
+        "--base-revision",
+        String(baseRevision),
+        "--annotation-root",
+        this.annotationStoreRoot,
+      ]);
+    }
+  }
+
+  async dismissAnnotation(annotationId: string, reason?: string): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "dismiss",
+      "--capture",
+      annotationId,
+      "--annotation-root",
+      this.annotationStoreRoot,
+      ...(reason ? ["--reason", reason] : []),
+    ]);
+  }
+
+  async interpretAnnotation(annotationId: string): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "interpret",
+      "--capture",
+      annotationId,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ]);
+  }
+
+  async correctAnnotationTranscript(
+    annotationId: string,
+    text: string,
+  ): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "transcribe",
+      "--capture",
+      annotationId,
+      "--text",
+      text,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ]);
+  }
+
+  private async commitRecordedPromotions(
+    taskFile: string,
+    result: unknown,
+  ): Promise<void> {
+    let evidence: SourceEvidenceInput[] = [];
+    try {
+      const task = JSON.parse(await fs.readFile(taskFile, "utf8")) as {
+        timelineEditPlan?: { sourceEvidence?: SourceEvidenceInput[] };
+        operationId?: string;
+      };
+      evidence = task.timelineEditPlan?.sourceEvidence ?? [];
+    } catch {
+      return;
+    }
+    if (evidence.length === 0) return;
+    const root = (result ?? {}) as Record<string, unknown>;
+    const revision = Number(root.revision);
+    if (!Number.isFinite(revision)) return;
+    const receipt = root.receipt ?? result;
+    const receiptDigest =
+      typeof root.receiptDigest === "string" &&
+      root.receiptDigest.startsWith("sha256:")
+        ? root.receiptDigest
+        : `sha256:${createHash("sha256").update(JSON.stringify(receipt)).digest("hex")}`;
+    const taskId = String(root.operationId ?? "");
+    if (!taskId) return;
+    for (const item of evidence) {
+      await this.runJson([
+        "annotation",
+        "promotion-commit",
+        "--capture",
+        item.annotationId,
+        "--task-id",
+        taskId,
+        "--committed-revision",
+        String(revision),
+        "--receipt-digest",
+        receiptDigest,
+        "--annotation-root",
+        this.annotationStoreRoot,
+      ]);
+    }
+  }
+
+  async stageAnnotationDerive(input: {
+    captureId: string;
+    mode: "transcribe" | "interpret" | "correct";
+    text?: string;
+    language?: string;
+    intents?: unknown[];
+  }): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "derive-stage",
+      "--capture",
+      input.captureId,
+      "--mode",
+      input.mode,
+      "--annotation-root",
+      this.annotationStoreRoot,
+      ...(input.text ? ["--text", input.text] : []),
+      ...(input.language ? ["--language", input.language] : []),
+      ...(input.intents
+        ? ["--intents-json", JSON.stringify(input.intents)]
+        : []),
+    ]);
+  }
+
+  async runAnnotationDerive(handle: string, digest: string): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "derive-run",
+      "--handle",
+      handle,
+      "--digest",
+      digest,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ]);
+  }
+
+  async annotationDeriveStatus(handle: string): Promise<unknown> {
+    return this.runJson([
+      "annotation",
+      "derive-status",
+      "--handle",
+      handle,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ]);
+  }
+
+  async promoteAnnotation(input: {
+    annotationId: string;
+    characterName: string;
+    layer: number;
+    maxLength?: number;
+  }): Promise<unknown> {
+    const preview = (await this.runJson([
+      "annotation",
+      "promote",
+      "--capture",
+      input.annotationId,
+      "--character-name",
+      input.characterName,
+      "--layer",
+      String(input.layer),
+      "--max-length",
+      String(input.maxLength ?? 300),
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ])) as { operations?: unknown };
+    const operations = timelineEditOpsFromPromote(preview);
+    if (operations.length === 0) {
+      throw new Error("capture has no narration intent to promote");
+    }
+    const staged = await this.stageTimelineEdit({ operations });
+    return { ...preview, staged };
+  }
+
+  async pinAnnotation(input: {
+    annotationId: string;
+    layer?: number;
+  }): Promise<unknown> {
+    const preview = (await this.runJson([
+      "annotation",
+      "pin",
+      "--capture",
+      input.annotationId,
+      "--layer",
+      String(input.layer ?? 90),
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ])) as { operations?: unknown };
+    const operations = timelineEditOpsFromPromote(preview);
+    if (operations.length === 0) {
+      throw new Error("capture cannot be pinned");
+    }
+    const staged = await this.stageTimelineEdit({ operations });
+    return { ...preview, staged };
+  }
+
+  async unpinAnnotation(input: { annotationId: string }): Promise<unknown> {
+    const preview = (await this.runJson([
+      "annotation",
+      "unpin",
+      "--capture",
+      input.annotationId,
+      "--annotation-root",
+      this.annotationStoreRoot,
+    ])) as { operations?: unknown };
+    const operations = timelineEditOpsFromPromote(preview);
+    if (operations.length === 0) {
+      throw new Error("capture has no pin to remove");
+    }
+    const staged = await this.stageTimelineEdit({ operations });
+    return { ...preview, staged };
   }
 
   private async requireNamedProject(): Promise<Ymm4Snapshot> {
@@ -807,6 +1187,38 @@ export class Ymm4Workflow {
       );
       const prepared = input.operations.map(
         (operation, index): PreparedTimelineEditOperation => {
+          if (operation.op === "annotation_marker_create") {
+            return {
+              type: "annotation_marker_create",
+              marker: {
+                realizationId: randomUUID(),
+                entityId: operation.entityId,
+                annotationId: operation.annotationId,
+                projectId: snapshot.projectId,
+                frame: operation.frame,
+                layer: operation.layer,
+                length: operation.length,
+                label: operation.label?.trim() || "メモ",
+              },
+              sourceEvidence: operation.sourceEvidence,
+            };
+          }
+          if (operation.op === "annotation_marker_delete") {
+            return {
+              type: "annotation_marker_delete",
+              marker: {
+                realizationId: operation.realizationId,
+                entityId: operation.entityId,
+                annotationId: operation.annotationId,
+                projectId: snapshot.projectId,
+                frame: operation.frame,
+                layer: operation.layer,
+                length: operation.length,
+                label: "メモ",
+              },
+              sourceEvidence: operation.sourceEvidence,
+            };
+          }
           if (operation.op === "native_voice_create") {
             return {
               type: "native_voice_create",
@@ -821,6 +1233,7 @@ export class Ymm4Workflow {
                 layer: operation.layer,
                 maxLength: operation.maxLength,
               },
+              sourceEvidence: operation.sourceEvidence,
             };
           }
           const materialized = portableByIndex.get(index);
@@ -842,6 +1255,7 @@ export class Ymm4Workflow {
               audioLayer: operation.audioLayer,
               captionLayer: operation.captionLayer,
             },
+            sourceEvidence: operation.sourceEvidence,
           };
         },
       );
@@ -876,6 +1290,12 @@ export class Ymm4Workflow {
         String(head),
         ...this.expectedProjectArgs(canonical),
       ])) as TimelineEditStagedResult;
+      await this.recordAnnotationPromotions(
+        prepared,
+        result.planDigest,
+        result.baseRevision,
+        String(result.operationId),
+      );
       return {
         ...result,
         handle,
@@ -890,14 +1310,23 @@ export class Ymm4Workflow {
                 primaryLayer: operation.utterance.audioLayer,
                 secondaryLayer: operation.utterance.captionLayer,
               }
-            : {
-                entityId: operation.cue.entityId,
-                realizationId: operation.cue.realizationId,
-                frame: operation.cue.frame,
-                maxLength: operation.cue.maxLength,
-                primaryLayer: operation.cue.layer,
-                secondaryLayer: null,
-              },
+            : operation.type === "native_voice_create"
+              ? {
+                  entityId: operation.cue.entityId,
+                  realizationId: operation.cue.realizationId,
+                  frame: operation.cue.frame,
+                  maxLength: operation.cue.maxLength,
+                  primaryLayer: operation.cue.layer,
+                  secondaryLayer: null,
+                }
+              : {
+                  entityId: operation.marker.entityId,
+                  realizationId: operation.marker.realizationId,
+                  frame: operation.marker.frame,
+                  maxLength: operation.marker.length,
+                  primaryLayer: operation.marker.layer,
+                  secondaryLayer: null,
+                },
         ),
       };
     } catch {
@@ -927,6 +1356,8 @@ export class Ymm4Workflow {
         digest,
         "--head",
         String(head),
+        "--annotation-root",
+        this.annotationStoreRoot,
         ...this.expectedProjectArgs(canonical),
       ]);
       this.validateCanonicalMutationResult(
@@ -935,6 +1366,7 @@ export class Ymm4Workflow {
         head,
         "YMM4 timeline edit",
       );
+      await this.commitRecordedPromotions(taskFile, result);
       return result;
     } catch {
       throw new Error(

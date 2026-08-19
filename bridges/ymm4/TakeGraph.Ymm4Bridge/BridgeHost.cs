@@ -46,6 +46,15 @@ internal sealed class BridgeHost : IDisposable
         ? $"TakeGraph YMM4 Bridge: {BaseUrl}"
         : "TakeGraph YMM4 Bridge: stopped";
 
+    internal Task<AnnotationSeekResult> SeekAnnotationFrameAsync(AnnotationSeekRequest request) =>
+        facade.SeekAnnotationFrameAsync(request);
+
+    internal Task SyncAnnotationDecorationsAsync(IReadOnlyList<CaptureAnnotationDto> annotations) =>
+        facade.SyncAnnotationDecorationsAsync(annotations);
+
+    internal LiveAnnotationScope? TryReadLiveAnnotationScope() =>
+        facade.TryReadLiveAnnotationScope();
+
     internal void Start()
     {
         if (listener.IsListening)
@@ -54,6 +63,7 @@ internal sealed class BridgeHost : IDisposable
         }
         ApplyRequestDigest.ValidateCrossRuntimeGolden();
         RemarkCodec.ValidateRoundTrip();
+        AnnotationDecorationCodec.ValidateRoundTrip();
         listener.Prefixes.Add(BaseUrl);
         listener.Start();
         facade.BeginStartupRecovery();

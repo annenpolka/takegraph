@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatAgentError,
+  formatAnnotationsText,
   formatCompositionText,
   formatDescriptorInventoryText,
   formatRenderProfilesText,
@@ -199,6 +200,8 @@ test("agent guide presents the consolidated task workflow and approval tokens", 
     TAKEGRAPH_AGENT_GUIDE,
     /kind=timeline_edit.*operations.*1-128.*portable_voice_create.*native_voice_create.*one managed-cue task.*one exact planDigest/s,
   );
+  assert.match(TAKEGRAPH_AGENT_GUIDE, /sourceEvidence/);
+  assert.match(TAKEGRAPH_AGENT_GUIDE, /kind=annotation_derive/);
   assert.match(TAKEGRAPH_AGENT_GUIDE, /timeline_edit restart.*intent=revalidate.*same taskId/s);
   assert.match(TAKEGRAPH_AGENT_GUIDE, /update\/delete remain on kind=native_voice_mutation/);
   assert.match(TAKEGRAPH_AGENT_GUIDE, /Native extensions are not part of timeline_edit/);
@@ -210,9 +213,53 @@ test("agent guide presents the consolidated task workflow and approval tokens", 
     TAKEGRAPH_AGENT_GUIDE,
     /mode=save_untitled.*explicit path.*staging only/s,
   );
+  assert.match(TAKEGRAPH_AGENT_GUIDE, /view=annotations is read-only/);
+  assert.match(TAKEGRAPH_AGENT_GUIDE, /audioSha256, transcriptDigest, interpretationDigest, and derivePhase/);
+  assert.match(TAKEGRAPH_AGENT_GUIDE, /ASR executable\/model paths/);
   assert.match(TAKEGRAPH_AGENT_GUIDE, /Legacy route-specific tools are opt-in/);
   assert.match(TAKEGRAPH_AGENT_GUIDE, new RegExp(STORE_STUDIO));
   assert.match(TAKEGRAPH_AGENT_GUIDE, new RegExp(STORE_CANONICAL));
+});
+
+test("annotation inventory text names IDs and refuses capture from MCP", () => {
+  const text = formatAnnotationsText({
+    projectId: "project-a",
+    sourceFingerprint: "fp-1",
+    annotations: [
+      {
+        annotationId: "ann-1",
+        startFrame: 10,
+        endFrame: 20,
+        stability: "stable",
+        lifecycle: "active",
+        stale: false,
+        intents: [{ kind: "note" }],
+        temporal: { relation: "at", referenceFrame: 10, startOffsetFrames: 0 },
+        transcriptSummary: "残す",
+        audioSha256: `sha256:${"a".repeat(64)}`,
+        transcriptDigest: `sha256:${"b".repeat(64)}`,
+        interpretationDigest: `sha256:${"c".repeat(64)}`,
+        derivePhase: "succeeded",
+        promotionStatus: "staged",
+        promotionTaskId: "55555555-5555-4555-8555-555555555555",
+        promotionPlanDigest: `sha256:${"2".repeat(64)}`,
+        pinEntityId: "ann-aaaaaaaa-pin",
+        pinRealizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      },
+    ],
+  });
+  assert.match(text, /ann-1/);
+  assert.match(text, /frames=10-20/);
+  assert.match(text, /temporal=at@10:0/);
+  assert.match(text, /derivePhase=succeeded/);
+  assert.match(text, /audioSha256=sha256:a{64}/);
+  assert.match(text, /transcriptDigest=sha256:b{64}/);
+  assert.match(text, /promotion=staged/);
+  assert.match(text, /promotionPlanDigest=sha256:2{64}/);
+  assert.match(text, /pinEntityId=ann-aaaaaaaa-pin/);
+  assert.match(text, /do not restage/);
+  assert.match(text, /recording is local-only/);
+  assert.match(text, /annotation_derive/);
 });
 
 test("agent errors keep the original message and add a next action", () => {
